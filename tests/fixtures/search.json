@@ -1,0 +1,22 @@
+{
+  "success": true,
+  "code": 0,
+  "data": {
+    "has_more": true,
+    "items": [
+      {
+        "id": "68add7d50000000000000001",
+        "model_type": "note",
+        "xsec_token": "fixture-search-token=",
+        "note_card": {
+          "display_title": "周末咖啡散步",
+          "type": "normal",
+          "user": {"user_id": "fixture-author", "nickname": "测试作者"},
+          "interact_info": {"liked_count": "1.2万"},
+          "cover": {"url_default": "https://sns-img-bd.xhscdn.com/fixture-cover"}
+        }
+      },
+      {"model_type": "hot_query", "id": "not-a-note"}
+    ]
+  }
+}

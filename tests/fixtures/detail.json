@@ -1,0 +1,25 @@
+{
+  "success": true,
+  "data": {
+    "items": [{
+      "id": "68add7d50000000000000001",
+      "note_card": {
+        "note_id": "68add7d50000000000000001",
+        "title": "周末咖啡散步",
+        "desc": "记录城市里的咖啡店。\n第二行正文。",
+        "type": "normal",
+        "time": 1788000000000,
+        "user": {"user_id": "fixture-author", "nickname": "测试作者"},
+        "tag_list": [{"name": "咖啡"}, {"name": "城市漫步"}],
+        "interact_info": {"liked_count": "123", "collected_count": "42", "comment_count": "7"},
+        "image_list": [
+          {"url_default": "https://sns-img-bd.xhscdn.com/fixture-1?token=one"},
+          {"info_list": [
+            {"image_scene": "WB_PRV", "url": "https://sns-img-bd.xhscdn.com/fixture-2-preview"},
+            {"image_scene": "WB_DFT", "url": "https://sns-img-bd.xhscdn.com/fixture-2"}
+          ]}
+        ]
+      }
+    }]
+  }
+}

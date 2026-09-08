@@ -1,0 +1,41 @@
+name: Tests
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  unit:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python: ["3.11", "3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+          cache: pip
+          cache-dependency-path: requirements-reader.txt
+      - run: pip install -r requirements-reader.txt ruff
+      - run: ruff check xhs.py request/reader tests/test_reader*.py
+      - run: ruff format --check xhs.py request/reader tests/test_reader*.py
+      - run: python -m unittest discover -s tests -v
+
+  browser:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: requirements-reader.txt
+      - run: pip install -r requirements-reader.txt
+      - run: python -m playwright install --with-deps chromium
+      - run: python -m unittest discover -s tests -v
+        env:
+          REDCRACK_BROWSER_TESTS: "1"
