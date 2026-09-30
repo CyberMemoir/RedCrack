@@ -1,5 +1,7 @@
 # RedCrack
 
+> [CyberMemoir](https://github.com/CyberMemoir) 项目的一部分；CyberMemoir 是由 [Cogstruct AI](https://github.com/Cogstruct-ai) 开发和维护的开源互联网文化记忆计划。
+
 **小红书自动搜索、批量下载与本地归档工具。** 使用 Python + Playwright，通过独立浏览器保存登录状态，读取网页自己的搜索结果和笔记详情；无需手动填写 Cookie 或维护请求签名。保留原有自动发布模块。
 
 ## 功能
