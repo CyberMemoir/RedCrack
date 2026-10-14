@@ -6,6 +6,8 @@
 
 ## 功能
 
+常驻服务器使用 [生产采集接入说明](docs/server-collection.md) 中的共享队列；以下命令是有界读取入口。真实账号连续运行仍待服务器验收。
+
 - **推荐页发现**：`python xhs.py discover --limit 5 --max-scrolls 2 --headless -o output/feed-window`，只读取当前账号推荐页，不声称全站热门覆盖。保存正文卡片、来源证据与`discovery.json`入口信息；不下载媒体、不调用模型。搜索与推荐缓存分开，共享原有访问预算、串行锁与验证暂停规则。
 
 - **关键词搜索**：自动滚动翻页、按笔记 ID 去重、保留完整访问链接。

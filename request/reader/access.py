@@ -1,10 +1,12 @@
 """A persistent stop after an access warning; never schedules a retry."""
 
 import json
+import os
 from datetime import UTC, datetime
 from pathlib import Path
 
 from .errors import VerificationRequiredError
+from .export import write_json
 from .runtime import ProfileRuntime
 
 
@@ -21,10 +23,7 @@ class AccessPause:
 
     def stop(self, reason: str) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        self.path.write_text(
-            json.dumps({"stopped_at": datetime.now(UTC).isoformat(), "reason": reason}),
-            encoding="utf-8",
-        )
+        write_json(self.path, {"stopped_at": datetime.now(UTC).isoformat(), "reason": reason})
         raise VerificationRequiredError(reason + "；已暂停此 profile 的读取，请人工处理提醒。")
 
     def acknowledge(self, reason: str) -> None:
@@ -41,6 +40,8 @@ class AccessPause:
                 "a", encoding="utf-8"
             ) as file:
                 file.write(json.dumps(stopped, ensure_ascii=False) + "\n")
+                file.flush()
+                os.fsync(file.fileno())
             self.path.unlink()
         finally:
             runtime.close()
