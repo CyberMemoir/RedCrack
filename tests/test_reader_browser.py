@@ -5,6 +5,7 @@ import os
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import AsyncMock, patch
 from urllib.parse import parse_qs, urlsplit
 
 from request.reader.browser import XHSReader
@@ -45,7 +46,7 @@ class BrowserIntegrationTests(unittest.IsolatedAsyncioTestCase):
                 if self.mode == "verification":
                     await route.fulfill(status=461, json={"success": False})
                     return
-                data = json.loads((FIXTURES / "search.json").read_text())
+                data = json.loads((FIXTURES / "search.json").read_text(encoding="utf-8"))
                 body = route.request.post_data_json
                 self.pages_requested.append(body["page"])
                 if body["page"] > 1:
@@ -57,7 +58,9 @@ class BrowserIntegrationTests(unittest.IsolatedAsyncioTestCase):
                 await route.fulfill(json=data)
                 return
             if parts.path == "/api/sns/web/v1/feed":
-                await route.fulfill(json=json.loads((FIXTURES / "detail.json").read_text()))
+                await route.fulfill(
+                    json=json.loads((FIXTURES / "detail.json").read_text(encoding="utf-8"))
+                )
                 return
             if parts.path == "/search_result":
                 keyword = parse_qs(parts.query)["keyword"][0]
@@ -88,9 +91,9 @@ class BrowserIntegrationTests(unittest.IsolatedAsyncioTestCase):
                 return
             if parts.path.startswith("/explore/"):
                 if self.mode == "state":
-                    card = json.loads((FIXTURES / "detail.json").read_text())["data"]["items"][0][
-                        "note_card"
-                    ]
+                    card = json.loads((FIXTURES / "detail.json").read_text(encoding="utf-8"))[
+                        "data"
+                    ]["items"][0]["note_card"]
                     state = {"note": {"noteDetailMap": {ID: {"note": card}}}}
                     html = "<script>window.__INITIAL_STATE__=" + json.dumps(state) + ";</script>"
                 else:
@@ -108,7 +111,7 @@ class BrowserIntegrationTests(unittest.IsolatedAsyncioTestCase):
     async def test_search_paginates_and_preserves_token(self):
         checkpoints = []
         notes = await self.reader.search(
-            "咖啡", limit=5, on_progress=lambda notes: checkpoints.append(len(notes))
+            "咖啡", limit=5, max_scrolls=1, on_progress=lambda notes: checkpoints.append(len(notes))
         )
         self.assertEqual([n.note_id for n in notes], [ID, ID2])
         self.assertEqual(self.pages_requested, [1, 2])
@@ -173,3 +176,17 @@ class BrowserIntegrationTests(unittest.IsolatedAsyncioTestCase):
         note = await self.reader.get_note("http://xhslink.com/a/fixture")
         self.assertEqual(note.note_id, ID)
         self.assertIn("xsec_token=fixture", note.url)
+
+    async def test_visible_behavior_warning_stops_before_next_navigation(self):
+        await self.reader.page.goto("https://www.xiaohongshu.com/explore")
+        await self.reader.page.set_content('<div role="alert">与真人操作习惯不太一致</div>')
+        with patch.object(self.reader.page, "goto", AsyncMock()) as navigate:
+            with self.assertRaises(VerificationRequiredError):
+                await self.reader.get_note(ID)
+        navigate.assert_not_awaited()
+        self.assertTrue(self.reader.access_pause.path.exists())
+
+    async def test_note_discussing_warning_is_not_account_warning(self):
+        await self.reader.page.set_content("<article>有人说与真人操作习惯不太一致</article>")
+        await self.reader._check_access()
+        self.assertFalse(self.reader.access_pause.path.exists())

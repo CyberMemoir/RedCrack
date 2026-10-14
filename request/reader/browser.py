@@ -2,25 +2,31 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import time
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, urlencode, urlsplit
 
-from .errors import LoginRequiredError, ReaderError, VerificationRequiredError
+from .access import AccessPause
+from .cache import NoteCache
+from .errors import LoginRequiredError, NetworkReadError, ReaderError
+from .evidence import EvidenceArchive
 from .models import (
     SHORT_HOSTS,
     Note,
     normalize_note_url,
     note_id_from_url,
     parse_note,
-    parse_search_payload,
 )
+from .runtime import ProfileRuntime
 
 HOME_URL = "https://www.xiaohongshu.com/explore"
 SEARCH_PATH = "/api/sns/web/v1/search/notes"
 FEED_PATH = "/api/sns/web/v1/feed"
+HOMEFEED_PATH = "/api/sns/web/v1/homefeed"
+WARNING_MARKERS = ("真人操作习惯", "操作过于频繁", "访问过于频繁", "异常访问", "非正常访问")
 
 READ_STATE = """() => {
     const s = window.__INITIAL_STATE__ || {};
@@ -54,7 +60,9 @@ class XHSReader:
         headless: bool = False,
         browser_channel: str = "auto",
         timeout_ms: int = 30_000,
-        interval: float = 1.5,
+        interval: float = 15,
+        refresh: bool = False,
+        evidence_dir: str | Path | None = None,
     ) -> None:
         if timeout_ms <= 0 or interval < 0:
             raise ValueError("timeout 必须大于 0，interval 不能为负数")
@@ -71,20 +79,31 @@ class XHSReader:
         self.context: Any = None
         self.page: Any = None
         self._responses: asyncio.Queue = asyncio.Queue()
+        self.access_pause = AccessPause(self.profile_dir)
+        self.runtime = ProfileRuntime(self.profile_dir, interval)
+        self.cache = NoteCache(self.profile_dir)
+        self.refresh = refresh
+        self.evidence = EvidenceArchive(Path(evidence_dir or self.profile_dir / "reader-evidence"))
+        self._payload_evidence: dict[int, dict] = {}
+        self.list_end_reason: str | None = None
 
     async def __aenter__(self) -> XHSReader:
-        await self.start()
+        self.access_pause.check()
+        self.runtime.acquire()
         return self
 
     async def __aexit__(self, *_: Any) -> None:
         await self.close()
 
     async def start(self) -> None:
+        self.access_pause.check()
+        self.runtime.acquire()
         if self.context:
             return
         try:
             from playwright.async_api import Error, async_playwright
         except ImportError as exc:
+            self.runtime.close()
             raise ReaderError("请先安装依赖：pip install -r requirements-reader.txt") from exc
         self.profile_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
         self._playwright = await async_playwright().start()
@@ -100,9 +119,18 @@ class XHSReader:
                 "headless": self.headless,
                 "locale": "zh-CN",
                 "viewport": {"width": 1440, "height": 960},
+                "timeout": self.timeout_ms,
             }
             if channel:
                 options["channel"] = channel
+                # The Playwright driver inherits its environment before launch options.
+                # Locate installed Chrome when the host omits ProgramFiles, without
+                # changing the user's process environment or browser profile.
+                if os.name == "nt" and channel == "chrome" and "ProgramFiles" not in os.environ:
+                    drive = os.environ.get("SystemDrive", "C:")
+                    executable = Path(drive + "/Program Files/Google/Chrome/Application/chrome.exe")
+                    if executable.is_file():
+                        options["executable_path"] = str(executable)
             try:
                 self.context = await self._playwright.chromium.launch_persistent_context(**options)
                 break
@@ -124,19 +152,24 @@ class XHSReader:
                 await self.context.close()
         finally:
             self.context = self.page = None
-            if self._playwright:
-                await self._playwright.stop()
+            try:
+                if self._playwright:
+                    await self._playwright.stop()
+            finally:
                 self._playwright = None
+                self.runtime.close()
 
     def _capture_response(self, response: Any) -> None:
         parts = urlsplit(response.url)
         if (parts.hostname or "").endswith(".xiaohongshu.com") and parts.path in {
             SEARCH_PATH,
             FEED_PATH,
+            HOMEFEED_PATH,
         }:
             self._responses.put_nowait(response)
 
     def _clear_responses(self) -> None:
+        self._payload_evidence.clear()
         while not self._responses.empty():
             self._responses.get_nowait()
 
@@ -153,20 +186,37 @@ class XHSReader:
                     request_data = {}
                 if request_data.get("keyword") not in (None, keyword):
                     continue
-            if response.status in (403, 429, 461, 471):
-                raise VerificationRequiredError(
-                    f"网页返回访问限制（HTTP {response.status}）；请在浏览器完成验证后重试"
+            if response.status in (403, 412, 429, 461, 471):
+                self.evidence.save(
+                    "access-restriction", {"path": path, "http_status": response.status}
                 )
+                await self._stop_access(f"网页返回访问限制（HTTP {response.status}）")
             if response.status == 401:
                 raise LoginRequiredError("登录已失效，请运行 python xhs.py login")
             if response.status >= 400:
-                raise ReaderError(f"小红书网页接口返回 HTTP {response.status}")
+                raise NetworkReadError(f"小红书网页接口返回 HTTP {response.status}，停止当前任务")
             try:
-                payload = await response.json()
+                payload = await asyncio.wait_for(response.json(), self.timeout_ms / 1000)
+            except TimeoutError as exc:
+                raise NetworkReadError("网页响应读取超时，停止当前任务") from exc
             except Exception as exc:
                 raise ReaderError("网页接口没有返回可读取的 JSON") from exc
             if not isinstance(payload, dict):
                 raise ReaderError("网页接口响应结构发生变化")
+            self._payload_evidence[id(payload)] = self.evidence.save(
+                (
+                    "discovery-response"
+                    if path == HOMEFEED_PATH
+                    else "search-response"
+                    if path == SEARCH_PATH
+                    else "detail-response"
+                ),
+                payload,
+            )
+            message = str(payload.get("msg") or payload.get("message") or "")
+            for marker in WARNING_MARKERS:
+                if marker in message:
+                    await self._stop_access("网页行为提醒：" + marker)
             if payload.get("success") is False:
                 code = payload.get("code")
                 if code in (-100, -100100, -101):
@@ -177,31 +227,84 @@ class XHSReader:
             payloads.append(payload)
         return payloads
 
-    async def _goto(self, url: str) -> None:
+    def _attach_evidence(self, note: Note, reference: dict, locator: str) -> Note:
+        note.observed_at = reference["observed_at"]
+        note.evidence = [{**reference, "locator": reference["locator"] + locator}]
+        return note
+
+    async def _goto(self, url: str, *, kind: str = "navigation") -> None:
+        self.access_pause.check()
         from playwright.async_api import Error
 
-        try:
-            await self.page.goto(url, wait_until="domcontentloaded", timeout=self.timeout_ms)
-        except Error as exc:
-            raise ReaderError("页面加载失败，请检查网络或增大 --timeout") from exc
+        async def check_page() -> None:
+            if self.page.url.startswith("https://www.xiaohongshu.com/"):
+                try:
+                    await self._check_access()
+                except LoginRequiredError:
+                    if kind != "login":
+                        raise
+
+        await check_page()
+        for attempt in range(2):
+            await self.runtime.before(kind, self.access_pause.check)
+            await check_page()
+            try:
+                response = await self.page.goto(
+                    url, wait_until="domcontentloaded", timeout=self.timeout_ms
+                )
+                if response is not None:
+                    status = response.status
+                    if status in (403, 412, 429, 461, 471):
+                        self.evidence.save(
+                            "access-restriction",
+                            {"path": urlsplit(url).path, "http_status": status},
+                        )
+                        await self._stop_access(f"页面返回访问限制（HTTP {status}）")
+                    if status == 401:
+                        raise LoginRequiredError("页面要求登录，停止当前任务")
+                    if status >= 400:
+                        raise NetworkReadError(f"页面返回 HTTP {status}，停止当前任务")
+                return
+            except Error as exc:
+                self.runtime.event("navigation_failed", kind=kind, attempt=attempt + 1)
+                await self._check_access()
+                for path in (SEARCH_PATH, FEED_PATH, HOMEFEED_PATH):
+                    await self._payloads(path)
+                if attempt or not any(
+                    marker in str(exc)
+                    for marker in ("net::ERR_CONNECTION", "net::ERR_NETWORK", "net::ERR_TIMED_OUT")
+                ):
+                    raise NetworkReadError("页面加载失败，已保存进度并停止访问") from exc
+                await asyncio.sleep(max(self.interval, 15))
 
     async def _state(self) -> dict:
         from playwright.async_api import Error
 
         try:
-            return await self.page.evaluate(READ_STATE)
+            return await asyncio.wait_for(self.page.evaluate(READ_STATE), self.timeout_ms / 1000)
+        except TimeoutError as exc:
+            raise NetworkReadError("页面状态读取超时，停止当前任务") from exc
         except Error:
             return {}
 
     async def _check_access(self, *, require_login: bool = False) -> None:
+        self.access_pause.check()
+        # Only active UI warnings, not a note discussing these phrases.
+        warnings = self.page.locator(
+            '[role="dialog"], [role="alert"], .verify-container, .captcha-container, '
+            ".risk-control-modal, .warning-modal, .el-message, .el-message-box"
+        )
+        for marker in WARNING_MARKERS:
+            if await warnings.filter(has_text=marker).first.is_visible():
+                await self._stop_access("页面行为提醒：" + marker)
         url = self.page.url.lower()
+        if any(marker in url for marker in ("/captcha", "/website-login/captcha", "/sorry")):
+            await self._stop_access("页面要求验证")
         if "/login" in url:
             raise LoginRequiredError("需要登录，请先运行 python xhs.py login")
-        if any(marker in url for marker in ("/captcha", "/website-login/captcha", "/sorry")):
-            raise VerificationRequiredError("页面要求验证，请在浏览器完成后重试")
         for selector in (".captcha-container", "#captcha-container", ".verify-container"):
             if await self.page.locator(selector).first.is_visible():
-                raise VerificationRequiredError("页面要求验证，请在浏览器完成后重试")
+                await self._stop_access("页面要求验证")
         for selector in (".login-container", ".login-modal", ".login-box"):
             if await self.page.locator(selector).first.is_visible():
                 raise LoginRequiredError("需要扫码登录，请先运行 python xhs.py login")
@@ -213,16 +316,32 @@ class XHSReader:
         ):
             raise LoginRequiredError("搜索需要登录，请先运行 python xhs.py login")
 
+    async def _stop_access(self, reason: str) -> None:
+        self.runtime.event(
+            "access_warning", reason=reason, attribution="unknown; warning may be delayed"
+        )
+        if self.page is not None:
+            try:
+                path = self.profile_dir / f"reader-warning-{time.time_ns()}.png"
+                await self.page.screenshot(path=str(path), timeout=3000)
+            except Exception:
+                self.runtime.event("warning_screenshot_unavailable")
+        self.access_pause.stop(reason)
+
     async def login(self, timeout_seconds: int = 300) -> None:
         if self.headless:
             raise LoginRequiredError("扫码登录需要有窗口模式，请去掉 --headless")
         if timeout_seconds <= 0:
             raise ValueError("登录等待时间必须大于 0")
         await self.start()
-        await self._goto(HOME_URL)
+        await self._goto(HOME_URL, kind="login")
         deadline = time.monotonic() + timeout_seconds
         prompted = False
         while time.monotonic() < deadline:
+            try:
+                await self._check_access()
+            except LoginRequiredError:
+                pass  # Expected during login; verification and warnings still stop.
             state = await self._state()
             own_link = self.page.locator(
                 '.side-bar a[href*="/user/profile/"], .user.side-bar-component a[href*="/user/profile/"]'
@@ -246,68 +365,174 @@ class XHSReader:
         self,
         keyword: str,
         *,
-        limit: int = 20,
-        max_scrolls: int = 30,
+        limit: int = 5,
+        max_scrolls: int = 2,
         on_progress: Callable[[list[Note]], None] | None = None,
     ) -> list[Note]:
         keyword = keyword.strip()
-        if not keyword or limit <= 0 or max_scrolls < 0:
-            raise ValueError("关键词不能为空，limit 必须大于 0，max-scrolls 不能为负数")
+        if not keyword:
+            raise ValueError("关键词不能为空")
+        query = urlencode({"keyword": keyword, "source": "web_explore_feed"})
+        return await self._list_notes(
+            f"https://www.xiaohongshu.com/search_result?{query}",
+            SEARCH_PATH,
+            cache_kind="search",
+            keyword=keyword,
+            limit=limit,
+            max_scrolls=max_scrolls,
+            on_progress=on_progress,
+        )
+
+    async def discover(
+        self,
+        *,
+        limit: int = 5,
+        max_scrolls: int = 2,
+        on_progress: Callable[[list[Note]], None] | None = None,
+    ) -> list[Note]:
+        """Read this profile's normal recommendation feed, not a global hot chart."""
+        return await self._list_notes(
+            HOME_URL,
+            HOMEFEED_PATH,
+            cache_kind="discover",
+            limit=limit,
+            max_scrolls=max_scrolls,
+            on_progress=on_progress,
+        )
+
+    async def _list_notes(
+        self,
+        url: str,
+        response_path: str,
+        *,
+        cache_kind: str,
+        keyword: str = "",
+        limit: int = 5,
+        max_scrolls: int = 2,
+        on_progress: Callable[[list[Note]], None] | None = None,
+    ) -> list[Note]:
+        if limit <= 0 or not 0 <= max_scrolls <= 2:
+            raise ValueError("limit 必须大于0，max-scrolls范围0–2")
+        self.access_pause.check()
+        self.runtime.acquire()
+        cache_key = json.dumps([keyword, limit, max_scrolls], ensure_ascii=False)
+        cached = None if self.refresh else self.cache.get(cache_kind, cache_key)
+        if cached is not None:
+            self.list_end_reason = "cached_bounded_result"
+            self.runtime.event(cache_kind + "_cache_hit", count=len(cached))
+            if on_progress:
+                on_progress(cached)
+            return cached
         await self.start()
         self._clear_responses()
-        query = urlencode({"keyword": keyword, "source": "web_explore_feed"})
-        await self._goto(f"https://www.xiaohongshu.com/search_result?{query}")
+        await self._goto(url, kind="search")
         found: dict[str, Note] = {}
         idle = scrolls = 0
         received = exhausted = False
         initial_deadline = time.monotonic() + self.timeout_ms / 1000
+        page_deadline: float | None = None
         while True:
-            await asyncio.sleep(max(self.interval, 0.2))
+            await asyncio.sleep(0.3)
             before = len(found)
-            for payload in await self._payloads(SEARCH_PATH, keyword=keyword):
+            for payload in await self._payloads(response_path, keyword=keyword):
+                page_deadline = None
                 received = True
                 data = payload.get("data") or {}
                 if not isinstance(data, dict) or not isinstance(data.get("items"), list):
                     raise ReaderError("搜索接口数据结构发生变化，未找到 items 列表")
                 exhausted = data.get("has_more", data.get("hasMore")) is False
-                for note in parse_search_payload(payload):
-                    found[note.note_id] = note
+                reference = self._payload_evidence[id(payload)]
+                for index, item in enumerate(data["items"]):
+                    if not isinstance(item, dict) or item.get("model_type", "note") not in (
+                        "note",
+                        "note_card",
+                    ):
+                        continue
+                    try:
+                        note = parse_note(item)
+                    except ReaderError:
+                        continue
+                    found[note.note_id] = self._attach_evidence(
+                        note, reference, f"/data/items/{index}"
+                    )
             await self._check_access(require_login=True)
             # API 结构变更时，仍可保留当前页面可见卡片及其完整访问令牌。
-            for card in await self.page.evaluate(READ_CARDS):
+            try:
+                cards = await asyncio.wait_for(
+                    self.page.evaluate(READ_CARDS), self.timeout_ms / 1000
+                )
+            except TimeoutError as exc:
+                raise NetworkReadError("可见搜索卡片读取超时，停止当前任务") from exc
+            for card in cards:
                 try:
                     url = normalize_note_url(card["url"])
                 except ValueError:
                     continue
                 note_id = note_id_from_url(url)
                 if note_id and note_id not in found:
-                    found[note_id] = Note(
-                        note_id, title=card["title"], author=card["author"], url=url
+                    found[note_id] = self._attach_evidence(
+                        Note(note_id, title=card["title"], author=card["author"], url=url),
+                        self.evidence.save("visible-card", card),
+                        "",
                     )
             notes = list(found.values())[:limit]
             if on_progress and len(found) != before:
                 on_progress(notes)
             if len(found) >= limit or exhausted:
-                return notes
+                self.list_end_reason = "entry_exhausted" if exhausted else "limit"
+                return self._save_list(cache_kind, cache_key, notes)
+            if page_deadline is not None and len(found) == before:
+                if time.monotonic() >= page_deadline:
+                    raise NetworkReadError("搜索翻页等待超时，已有结果保留，未缓存为完整搜索")
+                continue
+            page_deadline = None
             if not found and not received:
-                if await self.page.get_by_text("没有找到相关结果", exact=False).first.is_visible():
-                    return []
+                if (
+                    cache_kind == "search"
+                    and await self.page.get_by_text(
+                        "没有找到相关结果", exact=False
+                    ).first.is_visible()
+                ):
+                    return self._save_list(cache_kind, cache_key, [])
                 if time.monotonic() >= initial_deadline:
-                    raise ReaderError(
+                    raise NetworkReadError(
                         "未读到搜索结果：请检查登录、网络或页面结构；本次已抓取结果会保留"
                     )
                 continue
             idle = idle + 1 if len(found) == before else 0
-            if idle >= 4 or scrolls >= max_scrolls:
-                return notes
+            if idle >= 2 or scrolls >= min(max_scrolls, 2):
+                self.list_end_reason = "no_new_results" if idle >= 2 else "scroll_budget"
+                return self._save_list(cache_kind, cache_key, notes)
+            await self.runtime.before("scroll", self.access_pause.check)
+            await self._check_access(require_login=True)
             await self.page.mouse.wheel(0, 1400)
             scrolls += 1
+            page_deadline = time.monotonic() + self.timeout_ms / 1000
+
+    def _save_list(self, kind: str, key: str, notes: list[Note]) -> list[Note]:
+        self.cache.put(kind, key, notes)
+        return notes
 
     async def get_note(self, value: str) -> Note:
         url = normalize_note_url(value)
+        self.access_pause.check()
+        self.runtime.acquire()
+        cache_key = note_id_from_url(url) or url
+        cached = None if self.refresh else self.cache.get("detail", cache_key)
+        if cached:
+            self.runtime.event("detail_cache_hit", note_id=cached[0].note_id)
+            return cached[0]
         await self.start()
         self._clear_responses()
-        await self._goto(url)
+        await self._goto(url, kind="detail")
+        note = await self._read_note(url)
+        self.cache.put("detail", note.note_id, [note])
+        if cache_key != note.note_id:
+            self.cache.put("detail", cache_key, [note])
+        self.runtime.event("detail_saved", note_id=note.note_id)
+        return note
+
+    async def _read_note(self, url: str) -> Note:
         deadline = time.monotonic() + self.timeout_ms / 1000
         while time.monotonic() < deadline:
             await asyncio.sleep(0.3)
@@ -320,6 +545,9 @@ class XHSReader:
             except ValueError as exc:
                 raise ReaderError("笔记链接跳转到非笔记页面，可能已经删除或不可访问") from exc
             wanted = note_id_from_url(resolved) or note_id_from_url(url)
+            original_id = note_id_from_url(url)
+            if original_id and wanted != original_id:
+                raise ReaderError("笔记跳转后的 ID 与请求不一致，不关联到原来源")
             # 保留原链接中的 token，即使网页路由移除了 query。
             source_url = (
                 url
@@ -328,13 +556,20 @@ class XHSReader:
                 else resolved
             )
             for payload in await self._payloads(FEED_PATH):
-                for item in (payload.get("data") or {}).get("items") or []:
+                data = payload.get("data") or {}
+                if not isinstance(data, dict) or not isinstance(data.get("items"), list):
+                    raise ReaderError("详情接口数据结构发生变化，未找到 items 列表")
+                for index, item in enumerate(data["items"]):
+                    if not isinstance(item, dict):
+                        continue
                     try:
                         note = parse_note(item, fallback_url=source_url)
                     except ReaderError:
                         continue
                     if note.note_id == wanted:
-                        return note
+                        return self._attach_evidence(
+                            note, self._payload_evidence[id(payload)], f"/data/items/{index}"
+                        )
             details = (await self._state()).get("details") or {}
             if isinstance(details, dict):
                 for key, item in details.items():
@@ -345,8 +580,13 @@ class XHSReader:
                         and isinstance(item.get("note"), dict)
                         and item["note"]
                     ):
-                        return parse_note(item, fallback_url=source_url)
+                        note = parse_note(item, fallback_url=source_url)
+                        if note.note_id != wanted:
+                            raise ReaderError("页面详情 ID 与请求不一致，不关联到原来源")
+                        return self._attach_evidence(
+                            note, self.evidence.save("detail-state", item), ""
+                        )
             for message in ("当前笔记暂时无法浏览", "笔记已删除", "笔记不存在"):
                 if await self.page.get_by_text(message, exact=False).first.is_visible():
                     raise ReaderError(message + "；请使用包含 xsec_token 的完整分享链接")
-        raise ReaderError("未读取到笔记详情；请使用包含 xsec_token 的完整链接，或重新登录后重试")
+        raise NetworkReadError("笔记详情等待超时；未取得详情，停止当前任务")

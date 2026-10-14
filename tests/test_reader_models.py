@@ -15,7 +15,9 @@ ID = "68add7d50000000000000001"
 
 class ModelTests(unittest.TestCase):
     def test_search_fixture(self):
-        notes = parse_search_payload(json.loads((FIXTURES / "search.json").read_text()))
+        notes = parse_search_payload(
+            json.loads((FIXTURES / "search.json").read_text(encoding="utf-8"))
+        )
         self.assertEqual(len(notes), 1)
         self.assertEqual(notes[0].title, "周末咖啡散步")
         self.assertIn("fixture-search-token%3D", notes[0].url)
@@ -23,7 +25,9 @@ class ModelTests(unittest.TestCase):
         self.assertEqual(notes[0].media, [])  # 搜索封面不冒充完整图片列表。
 
     def test_detail_fixture(self):
-        item = json.loads((FIXTURES / "detail.json").read_text())["data"]["items"][0]
+        item = json.loads((FIXTURES / "detail.json").read_text(encoding="utf-8"))["data"]["items"][
+            0
+        ]
         note = parse_note(item)
         self.assertEqual(len(note.media), 2)
         self.assertEqual(note.media[1].url, "https://sns-img-bd.xhscdn.com/fixture-2")

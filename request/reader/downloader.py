@@ -5,12 +5,13 @@ import hashlib
 import json
 import os
 import tempfile
+from collections.abc import Awaitable, Callable
 from pathlib import Path
 from urllib.parse import urlsplit
 
 import aiohttp
 
-from .errors import DownloadError
+from .errors import DownloadError, NetworkReadError, VerificationRequiredError
 from .export import write_json, write_note
 from .models import NOTE_ID, MediaAsset, Note
 
@@ -73,12 +74,14 @@ class MediaDownloader:
         self,
         output: str | Path,
         *,
-        concurrency: int = 3,
-        retries: int = 2,
+        concurrency: int = 1,
+        retries: int = 1,
         max_bytes: int = 512 * 1024 * 1024,
         timeout: float = 120,
+        before_request: Callable[[], Awaitable[None]] | None = None,
+        on_restriction: Callable[[str], Awaitable[None]] | None = None,
     ) -> None:
-        if concurrency < 1 or retries < 0 or max_bytes < 1 or timeout <= 0:
+        if concurrency < 1 or not 0 <= retries <= 1 or max_bytes < 1 or timeout <= 0:
             raise ValueError("下载参数必须为正数，retries 允许为 0")
         self.output = Path(output).expanduser().resolve()
         self.retries = retries
@@ -86,6 +89,8 @@ class MediaDownloader:
         self.timeout = timeout
         self._semaphore = asyncio.Semaphore(concurrency)
         self._session: aiohttp.ClientSession | None = None
+        self.before_request = before_request
+        self.on_restriction = on_restriction
 
     async def __aenter__(self) -> MediaDownloader:
         self.output.mkdir(parents=True, exist_ok=True)
@@ -110,6 +115,8 @@ class MediaDownloader:
         temporary: str | None = None
         try:
             for _ in range(6):
+                if self.before_request:
+                    await self.before_request()
                 response = await self._session.get(url, allow_redirects=False)
                 if response.status not in (301, 302, 303, 307, 308):
                     break
@@ -122,7 +129,12 @@ class MediaDownloader:
                 url = validate_media_url(urljoin(url, location))
             else:
                 raise DownloadError("媒体重定向次数过多")
-            if response.status in (408, 429) or response.status >= 500:
+            if response.status in (403, 412, 429, 461, 471):
+                reason = f"媒体服务器访问限制（HTTP {response.status}）"
+                if self.on_restriction:
+                    await self.on_restriction(reason)
+                raise VerificationRequiredError(reason)
+            if response.status == 408 or response.status >= 500:
                 raise _RetryableDownload(f"媒体服务器暂不可用（HTTP {response.status}）")
             if response.status != 200:
                 raise DownloadError(
@@ -177,10 +189,10 @@ class MediaDownloader:
                     return await self._fetch(asset, directory, index)
                 except (TimeoutError, _RetryableDownload, aiohttp.ClientError) as exc:
                     if attempt == self.retries:
-                        raise DownloadError(
+                        raise NetworkReadError(
                             f"媒体下载在 {attempt + 1} 次尝试后失败（{type(exc).__name__}）"
                         ) from exc
-                    await asyncio.sleep(min(2**attempt, 8))
+                    await asyncio.sleep(15)
         raise AssertionError("unreachable")
 
     @staticmethod
@@ -247,6 +259,15 @@ class MediaDownloader:
                     records[index] = {**old, "url": asset.url, "status": "skipped"}
                 else:
                     records[index] = await self._download_asset(asset, directory, index)
+            except (NetworkReadError, VerificationRequiredError) as exc:
+                records[index] = {
+                    "index": index,
+                    "kind": asset.kind,
+                    "status": "failed",
+                    "error": type(exc).__name__,
+                }
+                snapshot()
+                raise
             except (DownloadError, OSError) as exc:
                 records[index] = {
                     "index": index,
@@ -259,5 +280,12 @@ class MediaDownloader:
             snapshot()
 
         snapshot()
-        await asyncio.gather(*(run(i, asset) for i, asset in enumerate(note.media, 1)))
+        tasks = [asyncio.create_task(run(i, asset)) for i, asset in enumerate(note.media, 1)]
+        try:
+            await asyncio.gather(*tasks)
+        finally:
+            for task in tasks:
+                if not task.done():
+                    task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
         return snapshot()
