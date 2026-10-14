@@ -5,14 +5,20 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import hashlib
 import json
 import math
 import sys
+import uuid
+from datetime import UTC, datetime
 from pathlib import Path
 
 from request.reader import LoginRequiredError, ReaderError, VerificationRequiredError, XHSReader
+from request.reader.access import AccessPause
+from request.reader.cache import NoteCache
+from request.reader.errors import NetworkReadError
 from request.reader.export import export_notes, write_json, write_note
-from request.reader.models import Note, normalize_note_url
+from request.reader.models import Note, normalize_note_url, note_id_from_url
 
 
 def positive_int(value: str) -> int:
@@ -48,17 +54,21 @@ def _browser_args(parser: argparse.ArgumentParser) -> None:
     )
     parser.add_argument("--timeout", type=positive_int, default=30, help="页面/结果等待超时（秒）")
     parser.add_argument(
-        "--interval", type=nonnegative_float, default=1.5, help="滚动/读取笔记的间隔秒数"
+        "--interval",
+        type=nonnegative_float,
+        default=15,
+        help="滚动/读取笔记的间隔秒数（非安全阈值）",
     )
+    parser.add_argument("--refresh", action="store_true", help="明确刷新缓存，重新访问计入预算")
 
 
 def _output_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--output", "-o", default="downloads", help="输出目录（默认 downloads）")
     parser.add_argument(
-        "--concurrency", type=positive_int, default=3, help="单篇笔记的媒体下载并发数"
+        "--concurrency", type=positive_int, default=1, help="单篇笔记的媒体下载并发数"
     )
     parser.add_argument(
-        "--retries", type=nonnegative_int, default=2, help="媒体下载失败后的重试次数"
+        "--retries", type=nonnegative_int, default=1, help="媒体下载失败后的重试次数（最多1）"
     )
     parser.add_argument(
         "--max-size-mb", type=positive_int, default=512, help="单个媒体最大大小（MiB）"
@@ -77,10 +87,19 @@ def build_parser() -> argparse.ArgumentParser:
     search = sub.add_parser("search", help="搜索关键词，导出 JSON/CSV，可同时下载")
     _browser_args(search)
     _output_args(search)
-    search.add_argument("keyword", help="搜索关键词")
-    search.add_argument("--limit", type=positive_int, default=20, help="最多采集多少篇笔记")
-    search.add_argument("--max-scrolls", type=nonnegative_int, default=30, help="最多向下滚动次数")
+    search.add_argument("keyword", nargs="?", default="", help="搜索关键词")
+    search.add_argument("--queries-file", help="有限关键词清单，每行一个；自动顺序处理")
+    search.add_argument("--limit", type=positive_int, default=5, help="最多采集多少篇笔记")
+    search.add_argument(
+        "--max-scrolls", type=nonnegative_int, default=2, help="最多向下滚动次数，上限2"
+    )
     search.add_argument("--download", action="store_true", help="搜索后读取详情并下载图片/视频")
+
+    discover = sub.add_parser("discover", help="读取当前账号推荐页；不是全站热门榜")
+    _browser_args(discover)
+    _output_args(discover)
+    discover.add_argument("--limit", type=positive_int, default=5)
+    discover.add_argument("--max-scrolls", type=nonnegative_int, default=2)
 
     download = sub.add_parser("download", help="批量下载笔记链接或搜索结果")
     _browser_args(download)
@@ -91,6 +110,13 @@ def build_parser() -> argparse.ArgumentParser:
     download.add_argument(
         "--metadata-only", action="store_true", help="只保存完整正文/元数据，不下载媒体"
     )
+    acknowledge = sub.add_parser(
+        "acknowledge-warning", help="人工处理提醒后确认工具暂停；不访问平台"
+    )
+    acknowledge.add_argument(
+        "--profile", default=str(Path.home() / ".redcrack" / "xhs_reader_profile")
+    )
+    acknowledge.add_argument("--reason", required=True, help="已人工检查/处理的情况")
     return parser
 
 
@@ -112,7 +138,13 @@ def collect_urls(args: argparse.Namespace) -> list[str]:
         values.extend(row["url"] for row in rows)
     if not values:
         raise ValueError("请提供笔记链接、--file 或 --from-json")
-    return list(dict.fromkeys(normalize_note_url(value) for value in values))
+    found = {}
+    for value in values:
+        url = normalize_note_url(value)
+        key = note_id_from_url(url) or url
+        if key not in found or "xsec_token=" in url:
+            found[key] = url
+    return list(found.values())
 
 
 def progress(message: str) -> None:
@@ -129,11 +161,28 @@ async def _download_batch(
     from request.reader.downloader import MediaDownloader
 
     output = Path(args.output).expanduser().resolve()
-    notes = {note.note_id: note for note in initial or []}
+    notes = {}
+    if (output / "results.json").exists():
+        saved = json.loads((output / "results.json").read_text(encoding="utf-8"))
+        notes = {row["note_id"]: NoteCache.restore(row) for row in saved.get("notes", [])}
+    notes.update((note.note_id, note) for note in initial or [] if note.note_id not in notes)
     attempts: list[dict] = []
     handled: set[str] = set()
     keyword = getattr(args, "keyword", "")
     metadata_only = getattr(args, "metadata_only", False)
+    if (output / "batch.json").exists():
+        old = json.loads((output / "batch.json").read_text(encoding="utf-8"))
+        attempts = old.get("attempts", [])
+    completed = {
+        row.get("note_id")
+        for row in attempts
+        if row.get("status") == "complete" or metadata_only and row.get("status") == "metadata_only"
+    }
+
+    async def before_media() -> None:
+        await reader.runtime.before("media", reader.access_pause.check)
+        if reader.page is not None:
+            await reader._check_access()
 
     def save(complete: bool = False) -> None:
         export_notes(list(notes.values()), output, keyword=keyword, complete=complete)
@@ -153,15 +202,33 @@ async def _download_batch(
         concurrency=args.concurrency,
         retries=args.retries,
         max_bytes=args.max_size_mb * 1024 * 1024,
+        before_request=before_media,
+        on_restriction=reader._stop_access,
     ) as downloader:
         for index, url in enumerate(urls, 1):
+            public_url = url.split("?", 1)[0]
+            note_id = note_id_from_url(url)
+            if (
+                metadata_only
+                and note_id
+                and note_id in completed
+                and not args.refresh
+                and (output / note_id / "note.json").is_file()
+            ):
+                progress(f"[{index}/{len(urls)}] 已完成，跳过重复任务")
+                cached = reader.cache.get("detail", note_id)
+                if cached:
+                    notes[note_id] = cached[0]
+                handled.add(note_id)
+                save()
+                continue
             progress(f"[{index}/{len(urls)}] 读取笔记…")
             try:
-                if index > 1:
-                    await asyncio.sleep(args.interval)
                 note = await reader.get_note(url)
                 if note.note_id in handled:
-                    attempts.append({"url": url, "note_id": note.note_id, "status": "duplicate"})
+                    attempts.append(
+                        {"url": public_url, "note_id": note.note_id, "status": "duplicate"}
+                    )
                     continue
                 notes[note.note_id] = note
                 if metadata_only:
@@ -173,18 +240,40 @@ async def _download_batch(
                 else:
                     result = await downloader.download_note(note)
                 handled.add(note.note_id)
-                attempts.append({"url": url, "note_id": note.note_id, "status": result["status"]})
+                attempts.append(
+                    {"url": public_url, "note_id": note.note_id, "status": result["status"]}
+                )
                 progress(f"  {note.title or note.note_id}: {result['status']}")
-            except (LoginRequiredError, VerificationRequiredError) as exc:
-                attempts.append({"url": url, "status": "failed", "error": str(exc)})
+            except (LoginRequiredError, VerificationRequiredError, NetworkReadError) as exc:
+                attempts.append(
+                    {
+                        "url": public_url,
+                        "note_id": note_id or None,
+                        "status": "failed",
+                        "error": type(exc).__name__,
+                    }
+                )
                 raise
             except (ReaderError, ValueError, OSError) as exc:
-                attempts.append({"url": url, "status": "failed", "error": str(exc)})
+                attempts.append(
+                    {
+                        "url": public_url,
+                        "note_id": note_id or None,
+                        "status": "failed",
+                        "error": type(exc).__name__,
+                    }
+                )
                 progress(f"  失败：{exc}")
             finally:
                 save()
     save(complete=True)
-    failed = sum(attempt["status"] in ("failed", "partial") for attempt in attempts)
+    latest = {attempt.get("note_id") or attempt["url"]: attempt for attempt in attempts}
+    requested = {note_id_from_url(url) or url.split("?", 1)[0] for url in urls}
+    failed = sum(
+        attempt["status"] in ("failed", "partial")
+        for key, attempt in latest.items()
+        if key in requested
+    )
     print(
         json.dumps(
             {
@@ -199,34 +288,114 @@ async def _download_batch(
     return 2 if failed else 0
 
 
-async def run(args: argparse.Namespace) -> int:
+async def _run(args: argparse.Namespace) -> int:
+    if args.command == "acknowledge-warning":
+        AccessPause(Path(args.profile).expanduser().resolve()).acknowledge(args.reason)
+        progress("已记录人工确认；未访问平台，不保证平台限制已解除。")
+        return 0
     # 在启动浏览器之前验证输入。
     urls = collect_urls(args) if args.command == "download" else []
-    if args.command == "search" and not args.keyword.strip():
-        raise ValueError("搜索关键词不能为空")
+    keywords = []
+    if args.command == "search":
+        keywords = [args.keyword.strip()] if args.keyword.strip() else []
+        if args.queries_file:
+            keywords += [
+                line.strip()
+                for line in Path(args.queries_file).read_text(encoding="utf-8-sig").splitlines()
+                if line.strip() and not line.lstrip().startswith("#")
+            ]
+        keywords = list(dict.fromkeys(keywords))
+        if not keywords:
+            raise ValueError("请提供关键词或 --queries-file")
+        if args.max_scrolls > 2:
+            raise ValueError("每次搜索最多翻页2次")
+    if getattr(args, "retries", 0) > 1:
+        raise ValueError("网络重试上限为1次")
     async with XHSReader(
         profile_dir=args.profile,
         headless=args.headless,
         browser_channel=args.browser_channel,
         timeout_ms=args.timeout * 1000,
         interval=args.interval,
+        refresh=args.refresh,
+        evidence_dir=(Path(args.output) / "evidence" if hasattr(args, "output") else None),
     ) as reader:
         if args.command == "login":
             progress("请在打开的小红书窗口完成扫码登录…")
             await reader.login(timeout_seconds=args.wait)
             print(json.dumps({"status": "logged_in", "profile": args.profile}, ensure_ascii=False))
             return 0
-        if args.command == "search":
+        if args.command == "discover":
             output = Path(args.output).expanduser().resolve()
 
             def checkpoint(notes: list[Note]) -> None:
-                export_notes(notes, output, keyword=args.keyword, complete=False)
-                progress(f"已采集 {len(notes)} / {args.limit} 篇")
+                export_notes(notes, output, complete=False)
 
-            notes = await reader.search(
-                args.keyword, limit=args.limit, max_scrolls=args.max_scrolls, on_progress=checkpoint
+            notes = await reader.discover(
+                limit=args.limit,
+                max_scrolls=args.max_scrolls,
+                on_progress=checkpoint,
             )
-            export_notes(notes, output, keyword=args.keyword)
+            export_notes(notes, output)
+            write_json(
+                output / "discovery.json",
+                {
+                    "entry_type": "category_feed",
+                    "entry_url": "https://www.xiaohongshu.com/explore",
+                    "personalized": True,
+                    "coverage": "bounded_profile_recommendations",
+                    "requested_limit": args.limit,
+                    "max_scrolls": args.max_scrolls,
+                    "cached": all(note.cached for note in notes) if notes else None,
+                    "not_a_global_hot_chart": True,
+                    "end_reason": reader.list_end_reason,
+                },
+            )
+            return 0
+        if args.command == "search":
+            output = Path(args.output).expanduser().resolve()
+            combined: dict[str, Note] = {}
+            for keyword in keywords:
+                folder = (
+                    output
+                    if len(keywords) == 1
+                    else output / "searches" / hashlib.sha256(keyword.encode()).hexdigest()[:16]
+                )
+
+                def checkpoint(notes: list[Note], folder=folder, keyword=keyword) -> None:
+                    export_notes(notes, folder, keyword=keyword, complete=False)
+                    combined.update((note.note_id, note) for note in notes)
+                    if folder != output:
+                        export_notes(
+                            list(combined.values()),
+                            output,
+                            keyword=" | ".join(keywords),
+                            complete=False,
+                        )
+                    progress(f"已保存搜索结果 {len(notes)} / {args.limit} 篇")
+
+                export_notes([], folder, keyword=keyword, complete=False)
+                try:
+                    notes = await reader.search(
+                        keyword,
+                        limit=args.limit,
+                        max_scrolls=args.max_scrolls,
+                        on_progress=checkpoint,
+                    )
+                    export_notes(notes, folder, keyword=keyword)
+                except ReaderError:
+                    reader.runtime.event("search_failed")
+                    raise
+                combined.update((note.note_id, note) for note in notes)
+                if folder != output:
+                    export_notes(
+                        list(combined.values()),
+                        output,
+                        keyword=" | ".join(keywords),
+                        complete=False,
+                    )
+            notes = list(combined.values())
+            export_notes(notes, output, keyword=" | ".join(keywords))
             if not args.download or not notes:
                 print(
                     json.dumps(
@@ -239,7 +408,54 @@ async def run(args: argparse.Namespace) -> int:
         return await _download_batch(reader, urls, args)
 
 
+async def run(args: argparse.Namespace) -> int:
+    if not hasattr(args, "output"):
+        return await _run(args)
+    output = Path(args.output).expanduser().resolve()
+    task = {
+        "schema_version": 1,
+        "task_id": uuid.uuid4().hex,
+        "command": args.command,
+        "started_at": datetime.now(UTC).isoformat(),
+        "status": "running",
+        "finished_at": None,
+        "exit_code": None,
+        "error": None,
+    }
+    history_path = output / "tasks" / f"{task['task_id']}.json"
+
+    def save() -> None:
+        write_json(history_path, task)
+        write_json(output / "task.json", task)
+
+    save()
+    try:
+        code = await _run(args)
+        task.update(status="complete" if code == 0 else "partial", exit_code=code)
+        return code
+    except (asyncio.CancelledError, KeyboardInterrupt):
+        task.update(status="interrupted", exit_code=130)
+        raise
+    except Exception as exc:
+        status, code = "failed", 2
+        if isinstance(exc, LoginRequiredError):
+            status, code = "login_required", 3
+        elif isinstance(exc, VerificationRequiredError):
+            status, code = "verification_required", 4
+        elif isinstance(exc, NetworkReadError):
+            status = "network_failed"
+        task.update(status=status, exit_code=code, error=type(exc).__name__)
+        raise
+    finally:
+        task["finished_at"] = datetime.now(UTC).isoformat()
+        save()
+
+
 def main(argv: list[str] | None = None) -> int:
+    # Piped Windows shells may default to cp1252; CLI text/JSON use UTF-8.
+    for stream in (sys.stdout, sys.stderr):
+        if hasattr(stream, "reconfigure"):
+            stream.reconfigure(encoding="utf-8")
     args = build_parser().parse_args(argv)
     try:
         return asyncio.run(run(args))
