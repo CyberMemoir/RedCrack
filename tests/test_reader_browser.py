@@ -58,7 +58,9 @@ class BrowserIntegrationTests(unittest.IsolatedAsyncioTestCase):
                 await route.fulfill(json=data)
                 return
             if parts.path == "/api/sns/web/v1/feed":
-                await route.fulfill(json=json.loads((FIXTURES / "detail.json").read_text(encoding="utf-8")))
+                await route.fulfill(
+                    json=json.loads((FIXTURES / "detail.json").read_text(encoding="utf-8"))
+                )
                 return
             if parts.path == "/search_result":
                 keyword = parse_qs(parts.query)["keyword"][0]
@@ -89,9 +91,9 @@ class BrowserIntegrationTests(unittest.IsolatedAsyncioTestCase):
                 return
             if parts.path.startswith("/explore/"):
                 if self.mode == "state":
-                    card = json.loads((FIXTURES / "detail.json").read_text(encoding="utf-8"))["data"]["items"][0][
-                        "note_card"
-                    ]
+                    card = json.loads((FIXTURES / "detail.json").read_text(encoding="utf-8"))[
+                        "data"
+                    ]["items"][0]["note_card"]
                     state = {"note": {"noteDetailMap": {ID: {"note": card}}}}
                     html = "<script>window.__INITIAL_STATE__=" + json.dumps(state) + ";</script>"
                 else:
@@ -185,6 +187,6 @@ class BrowserIntegrationTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(self.reader.access_pause.path.exists())
 
     async def test_note_discussing_warning_is_not_account_warning(self):
-        await self.reader.page.set_content('<article>有人说与真人操作习惯不太一致</article>')
+        await self.reader.page.set_content("<article>有人说与真人操作习惯不太一致</article>")
         await self.reader._check_access()
         self.assertFalse(self.reader.access_pause.path.exists())

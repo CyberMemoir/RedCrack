@@ -19,7 +19,10 @@ class AccessPauseTests(unittest.TestCase):
                 restarted.check()
             restarted.acknowledge("人工处理页面提醒后检查")
             restarted.check()
-            self.assertIn("操作过于频繁", (Path(folder)/"reader-access-history.jsonl").read_text(encoding="utf-8"))
+            self.assertIn(
+                "操作过于频繁",
+                (Path(folder) / "reader-access-history.jsonl").read_text(encoding="utf-8"),
+            )
 
     def test_empty_acknowledgement_keeps_pause(self):
         with tempfile.TemporaryDirectory() as folder:

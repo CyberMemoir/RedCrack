@@ -65,7 +65,9 @@ class CLITests(unittest.TestCase):
             with self.assertRaises(VerificationRequiredError):
                 pause.stop("提醒")
             with patch("xhs.XHSReader") as reader, contextlib.redirect_stderr(io.StringIO()):
-                code = xhs.main(["acknowledge-warning", "--profile", folder, "--reason", "人工处理"])
+                code = xhs.main(
+                    ["acknowledge-warning", "--profile", folder, "--reason", "人工处理"]
+                )
             self.assertEqual(code, 0)
             reader.assert_not_called()
 
