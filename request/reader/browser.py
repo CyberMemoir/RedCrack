@@ -479,7 +479,9 @@ class XHSReader:
             if on_progress and len(found) != before:
                 on_progress(notes)
             if len(found) >= limit or exhausted:
-                self.list_end_reason = "entry_exhausted" if exhausted else "limit"
+                self.list_end_reason = (
+                    "entry_exhausted" if exhausted and len(found) <= limit else "limit"
+                )
                 return self._save_list(cache_kind, cache_key, notes)
             if page_deadline is not None and len(found) == before:
                 if time.monotonic() >= page_deadline:
