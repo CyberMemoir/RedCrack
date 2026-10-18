@@ -93,6 +93,7 @@ class Note:
     observed_at: str | None = None
     cached: bool = False
     evidence: list[dict[str, Any]] = field(default_factory=list)
+    subtitle_tracks: list[dict[str, str]] = field(default_factory=list)
 
     @property
     def canonical_url(self) -> str:

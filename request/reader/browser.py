@@ -528,6 +528,14 @@ class XHSReader:
         self._clear_responses()
         await self._goto(url, kind="detail")
         note = await self._read_note(url)
+        # Only explicit tracks attached to the normal page's video element.
+        # Absence means not observed; never invoke OCR/ASR or infer a track URL.
+        tracks = await self.page.locator("video track[src]").evaluate_all(
+            "els => els.slice(0, 5).map(el => ({url: el.src, language: el.srclang || '', label: el.label || '', kind: el.kind || ''}))"
+        )
+        if not isinstance(tracks, list) or any(not isinstance(track, dict) for track in tracks):
+            raise ReaderError("页面字幕轨道结构变化")
+        note.subtitle_tracks = tracks
         self.cache.put("detail", note.note_id, [note])
         if cache_key != note.note_id:
             self.cache.put("detail", cache_key, [note])
