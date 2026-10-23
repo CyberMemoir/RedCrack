@@ -90,9 +90,17 @@ class Note:
     stats: dict[str, Any] = field(default_factory=dict)
     published_at: int | str | None = None
     media: list[MediaAsset] = field(default_factory=list)
+    observed_at: str | None = None
+    cached: bool = False
+    evidence: list[dict[str, Any]] = field(default_factory=list)
+    subtitle_tracks: list[dict[str, str]] = field(default_factory=list)
+
+    @property
+    def canonical_url(self) -> str:
+        return f"https://www.xiaohongshu.com/explore/{self.note_id.lower()}"
 
     def to_dict(self) -> dict[str, Any]:
-        return asdict(self)
+        return {**asdict(self), "canonical_url": self.canonical_url}
 
 
 def parse_note(item: dict, *, fallback_url: str = "") -> Note:
@@ -104,8 +112,13 @@ def parse_note(item: dict, *, fallback_url: str = "") -> Note:
     )
     if not NOTE_ID.fullmatch(note_id):
         raise ReaderError("响应缺少有效的笔记 ID")
+    note_id = note_id.lower()
     token = _get(item, "xsec_token", "xsecToken") or _get(card, "xsec_token", "xsecToken")
-    url = fallback_url or f"https://www.xiaohongshu.com/explore/{note_id}"
+    url = (
+        normalize_note_url(fallback_url)
+        if fallback_url and note_id_from_url(fallback_url) == note_id
+        else f"https://www.xiaohongshu.com/explore/{note_id}"
+    )
     if token:
         url = f"https://www.xiaohongshu.com/explore/{note_id}?{urlencode({'xsec_token': token, 'xsec_source': 'pc_search'})}"
     user = card.get("user") or {}
@@ -147,7 +160,7 @@ def parse_note(item: dict, *, fallback_url: str = "") -> Note:
     tags = [str(x.get("name")) for x in raw_tags if isinstance(x, dict) and x.get("name")]
     interactions = _get(card, "interact_info", "interactInfo", default={}) or {}
     stats = {
-        key: _get(interactions, *aliases, default=0)
+        key: _get(interactions, *aliases, default=None)
         for key, aliases in {
             "likes": ("liked_count", "likedCount"),
             "collects": ("collected_count", "collectedCount"),

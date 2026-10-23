@@ -59,6 +59,18 @@ class CLITests(unittest.TestCase):
             self.assertEqual(xhs.main(["download"]), 2)
             reader.assert_not_called()
 
+    def test_acknowledgement_is_offline(self):
+        with tempfile.TemporaryDirectory() as folder:
+            pause = xhs.AccessPause(Path(folder))
+            with self.assertRaises(VerificationRequiredError):
+                pause.stop("提醒")
+            with patch("xhs.XHSReader") as reader, contextlib.redirect_stderr(io.StringIO()):
+                code = xhs.main(
+                    ["acknowledge-warning", "--profile", folder, "--reason", "人工处理"]
+                )
+            self.assertEqual(code, 0)
+            reader.assert_not_called()
+
     def test_exit_codes(self):
         for error, code in (
             (LoginRequiredError("login"), 3),

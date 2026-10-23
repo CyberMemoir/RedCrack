@@ -148,7 +148,7 @@ class DownloaderIntegrationTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(sum(f["status"] == "failed" for f in result["files"]), 3)
             self.assertEqual(len(list((self.output / ID).glob("*.png"))), 1)
             self.assertFalse(list((self.output / ID).glob("*.part")))
-            manifest = json.loads((self.output / ID / "downloads.json").read_text())
+            manifest = json.loads((self.output / ID / "downloads.json").read_text(encoding="utf-8"))
             self.assertEqual(len(manifest["files"]), 4)
 
     async def test_size_limit_with_and_without_content_length(self):
@@ -180,7 +180,12 @@ class DownloaderIntegrationTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_reject_note_directory_symlink(self):
         with tempfile.TemporaryDirectory() as external:
-            (self.output / ID).symlink_to(external, target_is_directory=True)
+            try:
+                (self.output / ID).symlink_to(external, target_is_directory=True)
+            except OSError as exc:
+                if getattr(exc, "winerror", None) == 1314:
+                    self.skipTest("Windows account lacks symlink creation permission")
+                raise
             async with MediaDownloader(self.output) as downloader:
                 with self.assertRaises(DownloadError):
                     await downloader.download_note(self.note("/image"))

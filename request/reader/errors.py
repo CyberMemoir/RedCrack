@@ -12,3 +12,7 @@ class VerificationRequiredError(ReaderError):
 
 class DownloadError(ReaderError):
     """媒体下载失败。"""
+
+
+class NetworkReadError(ReaderError):
+    """有限重试后网络仍失败，当前任务应停止。"""
