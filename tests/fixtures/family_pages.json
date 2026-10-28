@@ -1,0 +1,24 @@
+{
+  "schema_name": "xhs-search-pages-fixture-v1",
+  "sample_mode": "fixture",
+  "pages": [
+    {
+      "cursor": null,
+      "next_cursor": "fixture:opaque-next-token",
+      "outcome": "partial",
+      "notes": [
+        {"note_id": "000000000000000000000001", "title": "合成甲表达是什么梗", "description": "这个表达是指合成示例。", "author_id": "fixture_author_a", "observed_at": "2026-01-02T00:00:00+00:00", "published_at": 1553184000, "publication_time": {"basis": "unix_seconds"}},
+        {"note_id": "000000000000000000000002", "title": "合成甲表达是什么梗", "description": "独立合成用例。", "author_id": "fixture_author_b", "observed_at": "2026-01-02T00:00:00+00:00", "published_at": 1553184000000, "publication_time": {"basis": "unix_milliseconds"}}
+      ]
+    },
+    {
+      "cursor": "fixture:opaque-next-token",
+      "next_cursor": null,
+      "outcome": "succeeded",
+      "notes": [
+        {"note_id": "000000000000000000000003", "title": "合成甲表达是什么梗", "description": "日期精度示例。", "author_id": "fixture_author_c", "observed_at": "2026-01-02T00:00:00+00:00", "published_at": "2020-01-02", "publication_time": {"basis": "date", "offset_minutes": 480}},
+        {"note_id": "000000000000000000000004", "title": "合成甲表达是什么梗", "description": "发布时间未知。", "author_id": null, "observed_at": "2026-01-02T00:00:00+00:00", "published_at": null}
+      ]
+    }
+  ]
+}

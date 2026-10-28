@@ -2,6 +2,8 @@
 
 本仓库提供正常网页reader与离线转换器。持久任务队列、数据库、跨平台资源租约、下载配额、OCR和长期调度由CyberMemoir共享采集服务负责。
 
+向中央梗族事件服务传递原文观察，使用独立的[family-source-bundle producer与平台动作接口](family-source-bundle.md)；图导出不替代自包含证据包。
+
 ```powershell
 python xhs.py collection-export --input downloads/window-01 --output output/exchange --tool-revision <commit>
 # 已有暂停时仍可离线整理；省略参数不会清除该输出中已保存的暂停

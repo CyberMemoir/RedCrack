@@ -138,6 +138,37 @@ def build_parser() -> argparse.ArgumentParser:
     collection.add_argument(
         "--tool-revision", default="unknown", help="导出工具提交版本；未知不推造"
     )
+    bundle = sub.add_parser("family-bundle", help="离线导出自包含family-source-bundle-v1")
+    bundle.add_argument("--input", action="append", required=True)
+    bundle.add_argument("--bundle", required=True, help="新包目录；同内容可重放，不覆盖不同内容")
+    bundle.add_argument("--source-id", required=True)
+    bundle.add_argument(
+        "--outcome",
+        required=True,
+        choices=["succeeded", "partial", "blocked_login", "blocked_verification", "failed"],
+    )
+    bundle.add_argument("--sample-mode", required=True, choices=["fixture", "historical", "live"])
+    bundle.add_argument(
+        "--publication-basis",
+        choices=["unix_seconds", "unix_milliseconds", "iso8601", "year", "month", "date"],
+    )
+    bundle.add_argument("--offset-minutes", type=int)
+    bundle.add_argument("--pause-record")
+    bundle.add_argument("--report")
+    actions = sub.add_parser("family-action", help="持久平台动作接口；当前执行器仅离线fixture")
+    actions.add_argument("--state-dir", required=True)
+    operations = actions.add_subparsers(dest="operation", required=True)
+    enqueue = operations.add_parser("enqueue")
+    enqueue.add_argument("--action", required=True)
+    enqueue.add_argument("--fixture", required=True)
+    enqueue.add_argument("--mode", choices=["head", "history"], required=True)
+    for name in ("run", "refresh", "stop", "cancel", "status"):
+        operation = operations.add_parser(name)
+        operation.add_argument("--recipe-id", required=True)
+        if name == "run":
+            operation.add_argument("--max-pages", type=positive_int, default=1)
+        if name in {"stop", "cancel"}:
+            operation.add_argument("--reason", required=True)
     return parser
 
 
@@ -310,6 +341,16 @@ async def _download_batch(
 
 
 async def _run(args: argparse.Namespace) -> int:
+    if args.command == "family-bundle":
+        from request.reader.family_bundle import bundle_cli
+
+        print(json.dumps(bundle_cli(args), ensure_ascii=False))
+        return 0
+    if args.command == "family-action":
+        from request.reader.family_actions import action_cli
+
+        print(json.dumps(action_cli(args), ensure_ascii=False))
+        return 0
     if args.command == "collection-export":
         from request.reader.collection import export_collection
 
