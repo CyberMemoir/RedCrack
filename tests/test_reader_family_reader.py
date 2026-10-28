@@ -108,6 +108,29 @@ class FamilyReaderTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(records[0]["item_id"], ID)
         self.assertEqual(records[0]["content_scope"], "search_card")
 
+    async def test_explicit_source_detail_does_not_search_or_invent_card_observation(self):
+        action = ACTION | {
+            "action_type": "detail",
+            "purpose": "find_original_reference",
+            "query": "https://www.xiaohongshu.com/explore/" + ID,
+        }
+        recipe = enqueue_reader(self.engine, action, self.args)["id"]
+        detail = self.card()
+        detail.content_scope, detail.stats = "detail", {"likes": "1.2万"}
+        with (
+            patch.object(
+                XHSReader,
+                "search",
+                AsyncMock(side_effect=AssertionError("no search for explicit URL")),
+            ),
+            patch.object(XHSReader, "get_note", AsyncMock(return_value=detail)) as get,
+        ):
+            result = await run_reader(self.engine, recipe, sample_mode="fixture")
+        get.assert_awaited_once_with(action["query"])
+        records, _ = self.records(result)
+        self.assertEqual(records[0]["metrics"], {"likes": "1.2万"})
+        self.assertEqual(records[0]["metrics_observed_at"], detail.observed_at)
+
     async def test_existing_pause_stops_before_reader_construction(self):
         profile = Path(self.args.reader_profile)
         profile.mkdir()

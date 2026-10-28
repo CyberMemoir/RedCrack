@@ -18,7 +18,7 @@ OUTCOMES = {"succeeded", "partial", "blocked_login", "blocked_verification", "fa
 SENSITIVE = re.compile(
     r"xsec_token|authorization|cookie\s*[:=]|https?://\S*[?&](?:token|sign|signature)=", re.I
 )
-PRIVATE_PATH = re.compile(r"[A-Za-z]:[\\/]|/(?:Users|home)/")
+PRIVATE_PATH = re.compile(r"(?<![A-Za-z0-9])[A-Za-z]:[\\/]|/(?:Users|home)/")
 TASK_OUTCOME = {
     "complete": "succeeded",
     "partial": "partial",
@@ -203,6 +203,24 @@ def build_bundle(
                 ):
                     raise ValueError("author_id must be a stable ID, not a name or URL")
                 view["author_id"] = author
+                metrics = {
+                    key: value
+                    for key, value in (row.get("stats") or row.get("metrics") or {}).items()
+                    if key in {"views", "likes", "collects", "comments", "shares"}
+                }
+                if any(
+                    type(value) not in {int, float, str, type(None)}
+                    or (
+                        isinstance(value, str)
+                        and (SENSITIVE.search(value) or PRIVATE_PATH.search(value))
+                    )
+                    for value in metrics.values()
+                ):
+                    raise ValueError(
+                        "Metrics must be original scalar observations without access data"
+                    )
+                if metrics:
+                    view["metrics"] = metrics
                 body = encoded(view)
                 evidence = sha256(body)
                 objects[evidence] = body
@@ -221,6 +239,8 @@ def build_bundle(
                     "publication_time_status": "unknown",
                 }
                 specification = row.get("publication_time", {})
+                if metrics:
+                    record["metrics"], record["metrics_observed_at"] = metrics, observed
                 if row.get("content_scope"):
                     record["content_scope"] = row["content_scope"]
                 if row.get("access_ref"):

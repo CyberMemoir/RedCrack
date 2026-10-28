@@ -179,6 +179,11 @@ def build_parser() -> argparse.ArgumentParser:
     audit = sub.add_parser("reader-audit", help="离线审计已保存搜索上下文、分页字段和作者ID证据")
     audit.add_argument("--input", action="append", required=True)
     audit.add_argument("--report", required=True)
+    anchor = sub.add_parser(
+        "family-anchor", help="B站既有family锚点转换为小红书定向动作；不新建family"
+    )
+    anchor.add_argument("--input", required=True)
+    anchor.add_argument("--directory", required=True)
     return parser
 
 
@@ -351,6 +356,11 @@ async def _download_batch(
 
 
 async def _run(args: argparse.Namespace) -> int:
+    if args.command == "family-anchor":
+        from request.reader.family_anchor import anchor_cli
+
+        print(json.dumps(anchor_cli(args), ensure_ascii=False))
+        return 0
     if args.command == "reader-audit":
         from request.reader.reader_audit import audit_archives
 

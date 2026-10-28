@@ -49,8 +49,11 @@ def worker_lock(root):
 
 
 def validate_action(action):
-    if action.get("action_type") != "search" or action.get("target_platform") != "xiaohongshu":
-        raise ValueError("This adapter only accepts Xiaohongshu search actions")
+    if (
+        action.get("action_type") not in {"search", "detail"}
+        or action.get("target_platform") != "xiaohongshu"
+    ):
+        raise ValueError("This adapter accepts Xiaohongshu search or explicit detail actions")
     uuid.UUID(action["family_id"])
     if (
         action.get("purpose") not in PURPOSES
@@ -62,7 +65,7 @@ def validate_action(action):
         raise ValueError("Action must retain nonempty evidence_refs")
     if action.get("query_layer") != "rule_seed" or action.get("is_actual_search_log") is not False:
         raise ValueError("Rule actions are rule_seed, not actual search logs")
-    return {
+    result = {
         key: action[key]
         for key in (
             "action_type",
@@ -75,6 +78,9 @@ def validate_action(action):
             "is_actual_search_log",
         )
     } | {"anchors": action.get("anchors", []), "priority": action.get("priority", 0)}
+    if "xhs_anchor" in action:
+        result["xhs_anchor"] = action["xhs_anchor"]
+    return result
 
 
 class FamilyActions:
@@ -109,6 +115,8 @@ class FamilyActions:
 
     def enqueue(self, action, fixture, mode):
         action = validate_action(action)
+        if action["action_type"] != "search":
+            raise ValueError("Page fixtures only support search; direct detail uses normal reader")
         if mode not in {"head", "history"}:
             raise ValueError("Expected head or history mode")
         body = Path(fixture).read_bytes()

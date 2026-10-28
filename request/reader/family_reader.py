@@ -13,7 +13,7 @@ from .errors import LoginRequiredError, ReaderError, VerificationRequiredError
 from .export import write_json
 from .family_actions import TERMINAL, validate_action, worker_lock
 from .family_bundle import build_bundle, encoded, sha256
-from .models import note_id_from_url
+from .models import Note, normalize_note_url, note_id_from_url
 
 
 def enqueue_reader(engine, action, args):
@@ -22,6 +22,12 @@ def enqueue_reader(engine, action, args):
         raise ValueError(
             "Real history unsupported: no evidenced restartable search/session cursor contract"
         )
+    if action["action_type"] == "detail":
+        note_id = note_id_from_url(normalize_note_url(action["query"]))
+        if not note_id or action["query"] != Note(note_id).canonical_url or args.detail_limit < 1:
+            raise ValueError(
+                "Direct detail requires an explicit canonical note URL and detail budget"
+            )
     if (
         not 1 <= args.limit <= 5
         or not 0 <= args.detail_limit <= args.limit
@@ -118,7 +124,24 @@ async def run_reader(engine, recipe, *, reader_factory=XHSReader, sample_mode="l
                     evidence_dir=folder / "private/evidence",
                 )
                 async with reader:
-                    if not state["search_complete"]:
+                    if current["action"]["action_type"] == "detail":
+                        wanted = note_id_from_url(current["action"]["query"])
+                        if wanted not in state["detail_done"]:
+                            detail = await controlled(
+                                reader.get_note(current["action"]["query"]), engine, recipe
+                            )
+                            if detail.note_id != wanted or detail.content_scope != "detail":
+                                raise ReaderError("Explicit reference detail ID/scope mismatch")
+                            state["notes"][wanted] = bind_access(
+                                detail.to_dict(), state["access_map"]
+                            )
+                            state["detail_done"].append(wanted)
+                            state["search_complete"], state["end_reason"] = (
+                                True,
+                                "explicit_reference_complete",
+                            )
+                            save()
+                    elif not state["search_complete"]:
 
                         def progress(notes):
                             state["cards"] = [
@@ -173,7 +196,9 @@ async def run_reader(engine, recipe, *, reader_factory=XHSReader, sample_mode="l
                         state["detail_done"].append(detail.note_id)
                         save()
                     state["outcome"] = (
-                        "succeeded" if state["end_reason"] == "entry_exhausted" else "partial"
+                        "succeeded"
+                        if state["end_reason"] in {"entry_exhausted", "explicit_reference_complete"}
+                        else "partial"
                     )
             except VerificationRequiredError:
                 state["outcome"], state["end_reason"] = (

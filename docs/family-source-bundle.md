@@ -61,7 +61,7 @@ head模式每次只取有界首页。完成后用`refresh --recipe-id RECIPE_ID`
 | 线上search_id/session/token恢复、历史时间筛选、作者/系列枚举 | 未支持；不以数字页码或fixture token代替 |
 | 中央dispatcher执行target_platform=xiaohongshu | 仍需中央接线；本PR不改公共dispatcher |
 
-线上action/token、观察时间和额外停止枚举缺口见[issue #7](https://github.com/CyberMemoir/RedCrack/issues/7)；历史热门来源与证据窗口见[issue #6](https://github.com/CyberMemoir/RedCrack/issues/6)。[设备暂停 #3](https://github.com/CyberMemoir/RedCrack/issues/3)及[详情恢复 #4](https://github.com/CyberMemoir/RedCrack/issues/4)保持未解决。历史热门优先，当前累计指标不证明过去热门。已有冻结材料、用户取消及账号设置均不因本接线改变。
+线上action/token、观察时间和额外停止枚举缺口见[issue #7](https://github.com/CyberMemoir/RedCrack/issues/7)。[issue #6](https://github.com/CyberMemoir/RedCrack/issues/6)的旧历史发现目标已由B站锚点分工替代。[设备暂停 #3](https://github.com/CyberMemoir/RedCrack/issues/3)及[详情恢复 #4](https://github.com/CyberMemoir/RedCrack/issues/4)保持未解决。已有冻结材料、用户取消及账号设置均不因本接线改变。
 
 ## 最小离线复核与能力证据
 
@@ -79,6 +79,25 @@ python xhs.py reader-audit --input saved/raw --report output/private-reader-audi
 | 正常搜索请求/响应上下文保存 | 是 | 是（合成捕获响应） | 否 | 否 | 同上 |
 | 跨进程恢复真实搜索cursor/session | 否 | 否 | 否 | 是 | 缺证据及暂停 |
 | 作者旧投稿/话题分页 | 否 | 否 | 否 | 是 | 无验证入口 |
-| 历史热门枚举/日期筛选 | 否 | 否 | 否 | 是 | 缺历史来源合同 |
+| 无锚点全站发现/新family登记 | 否 | 否 | 否 | 不在本路线范围 | B站负责 |
 
-已发布时间较早只证明“旧内容”；今天累计高互动只证明本次指标采样值。过去曾热门仍需同期榜单、同期互动/传播证据或明确标记的回顾声称，综合搜索翻页、当前热词和推荐共现都不能替代。
+时间线使用素材本身的发布时间；互动值按实际observed_at保存快照，不要求历史热度证明。词面、搜索和推荐关系仍不等于已确认二创因果。
+
+## 当前B站锚点输入转换
+
+B站负责新family发现。平台仅围绕已存在family定向找source/derivative/usage，不独立扩大新family登记。`family-anchor`是平台本地输入格式，不是中央action/ledger的新公共合同；保留原family_id、purpose、evidence_refs和explainer片段，放在行动的xhs_anchor上下文中等待中央统一绑定。绑定前不要把平台包接到独立新family发现流程。
+
+```json
+{"family_id":"00000000-0000-4000-8000-000000000001","explainer":{"work_id":"bilibili:BV1234567890","segment":{"start_ms":1000,"end_ms":2000}},"evidence_refs":[{"sample_mode":"fixture","evidence_id":"synthetic-seed","locator":"/query"}],"aliases":["合成甲表达"],"phrases":["原句示例"],"roles":["source","derivative","usage"],"source_hint":{"kind":"url","value":"https://www.xiaohongshu.com/explore/000000000000000000000001"}}
+```
+
+```powershell
+python xhs.py family-anchor --input anchor.json --directory output/anchor-actions
+# 对输出action文件逐个按原有有界family-action enqueue/run执行；原暂停保持
+```
+
+source_hint支持url/named/phrase；有明确小红书链接就产生优先的detail动作，直接调用get_note并核对同ID，不先搜索或补造卡片观察。其他路线的URL留deferred gap，原hint保留；具名来源和原句用原值检索。没有source_hint就missing_source，不猜源头。token不进公开动作，既有私有访问缓存/来源引用仍由reader正常恢复，缺失则保留真实失败而不猜token。
+
+别称/原句原样生成find_independent_uses动作，role_candidates可以同时含derivative和usage，relation_status始终candidate_not_confirmed；弱关联不丢弃，也不强判父边。new_name_leads只保存在plan的bilibili_review_leads，不生成family。CLI仅写计划和动作，不访问网络或自动提交中央队列。
+
+source记录保留原始likes/views/collects/comments/shares值（有才存）、metrics_observed_at及证据JSON中的原指标；不设新阈值，不补造历史播放。发布时间仍按已有明确单位/精度合同，不能用讲解发布时间替代素材发布时间。作者/话题/评论/归档能力只用于补锚点材料。中央调度、服务器资源及常驻部署不在本路线实现。
