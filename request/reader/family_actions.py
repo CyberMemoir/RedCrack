@@ -1,4 +1,4 @@
-"""Durable platform action handoff and offline cursor-driver execution.
+"""Durable action handoff for normal reader heads and offline cursor fixtures.
 
 This is a platform adapter spool, not the central family/task scheduler. Production
 search cursor replay remains unsupported; fixture tokens are never sent online.
@@ -129,6 +129,9 @@ class FamilyActions:
             if key in cursors or page["outcome"] not in OUTCOMES:
                 raise ValueError("Duplicate cursor or invalid reader outcome")
             cursors.add(key)
+        return self.save_recipe(action, body, mode)
+
+    def save_recipe(self, action, body, mode):
         fixture_sha = sha256(body)
         snapshot = self.root / "fixtures" / (fixture_sha + ".json")
         atomic_write(snapshot, body.decode("utf-8"))
@@ -310,9 +313,15 @@ class FamilyActions:
         return self.status(recipe)
 
 
-def action_cli(args):
+async def action_cli(args):
     engine = FamilyActions(args.state_dir)
     if args.operation == "enqueue":
+        if args.reader_profile:
+            from .family_reader import enqueue_reader
+
+            return enqueue_reader(
+                engine, json.loads(Path(args.action).read_text(encoding="utf-8")), args
+            )
         return engine.enqueue(
             json.loads(Path(args.action).read_text(encoding="utf-8")), args.fixture, args.mode
         )
@@ -323,6 +332,16 @@ def action_cli(args):
 
         previous = signal.signal(signal.SIGTERM, interrupted)
         try:
+            current = engine.status(args.recipe_id)
+            descriptor = json.loads(
+                (engine.root / "fixtures" / (current["fixture_sha"] + ".json")).read_text(
+                    encoding="utf-8"
+                )
+            )
+            if descriptor.get("schema_name") == "xhs-normal-reader-job-v1":
+                from .family_reader import run_reader
+
+                return await run_reader(engine, args.recipe_id)
             return engine.run(args.recipe_id, args.max_pages)
         finally:
             signal.signal(signal.SIGTERM, previous)

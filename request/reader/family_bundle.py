@@ -221,6 +221,12 @@ def build_bundle(
                     "publication_time_status": "unknown",
                 }
                 specification = row.get("publication_time", {})
+                if row.get("content_scope"):
+                    record["content_scope"] = row["content_scope"]
+                if row.get("access_ref"):
+                    if not re.fullmatch(r"[a-f0-9]{64}", row["access_ref"]):
+                        raise ValueError("access_ref must be a private mapping SHA256")
+                    record["access_ref"] = row["access_ref"]
                 basis = specification.get("basis", publication_basis)
                 offset = specification.get("offset_minutes", offset_minutes)
                 if raw_date is not None and basis:

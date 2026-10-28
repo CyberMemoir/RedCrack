@@ -274,6 +274,17 @@ class XHSReader:
                 ),
                 payload,
             )
+            if path == SEARCH_PATH and keyword:
+                # Preserve the actual normal page request body privately, without
+                # assuming which fields constitute a restartable cursor/session.
+                self.evidence.save(
+                    "search-context",
+                    {
+                        "request_path": path,
+                        "request_body": request_data,
+                        "response_sha256": self._payload_evidence[id(payload)]["sha256"],
+                    },
+                )
             message = str(payload.get("msg") or payload.get("message") or "")
             for marker in WARNING_MARKERS:
                 if marker in message:

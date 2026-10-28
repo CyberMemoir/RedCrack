@@ -155,12 +155,19 @@ def build_parser() -> argparse.ArgumentParser:
     bundle.add_argument("--offset-minutes", type=int)
     bundle.add_argument("--pause-record")
     bundle.add_argument("--report")
-    actions = sub.add_parser("family-action", help="持久平台动作接口；当前执行器仅离线fixture")
+    actions = sub.add_parser("family-action", help="有界正常reader或离线fixture动作接口；保持暂停")
     actions.add_argument("--state-dir", required=True)
     operations = actions.add_subparsers(dest="operation", required=True)
     enqueue = operations.add_parser("enqueue")
     enqueue.add_argument("--action", required=True)
-    enqueue.add_argument("--fixture", required=True)
+    driver = enqueue.add_mutually_exclusive_group(required=True)
+    driver.add_argument("--fixture")
+    driver.add_argument("--reader-profile", help="正常reader预算/profile目录；既有暂停保持")
+    enqueue.add_argument("--connect-existing", action="store_true")
+    enqueue.add_argument("--chrome-data-dir")
+    enqueue.add_argument("--limit", type=positive_int, default=2)
+    enqueue.add_argument("--detail-limit", type=nonnegative_int, default=1)
+    enqueue.add_argument("--max-scrolls", type=nonnegative_int, default=0)
     enqueue.add_argument("--mode", choices=["head", "history"], required=True)
     for name in ("run", "refresh", "stop", "cancel", "status"):
         operation = operations.add_parser(name)
@@ -169,6 +176,9 @@ def build_parser() -> argparse.ArgumentParser:
             operation.add_argument("--max-pages", type=positive_int, default=1)
         if name in {"stop", "cancel"}:
             operation.add_argument("--reason", required=True)
+    audit = sub.add_parser("reader-audit", help="离线审计已保存搜索上下文、分页字段和作者ID证据")
+    audit.add_argument("--input", action="append", required=True)
+    audit.add_argument("--report", required=True)
     return parser
 
 
@@ -341,6 +351,13 @@ async def _download_batch(
 
 
 async def _run(args: argparse.Namespace) -> int:
+    if args.command == "reader-audit":
+        from request.reader.reader_audit import audit_archives
+
+        result = audit_archives(args.input)
+        write_json(Path(args.report), result)
+        print(json.dumps({k: v for k, v in result.items() if k != "files"}, ensure_ascii=False))
+        return 0
     if args.command == "family-bundle":
         from request.reader.family_bundle import bundle_cli
 
@@ -349,7 +366,7 @@ async def _run(args: argparse.Namespace) -> int:
     if args.command == "family-action":
         from request.reader.family_actions import action_cli
 
-        print(json.dumps(action_cli(args), ensure_ascii=False))
+        print(json.dumps(await action_cli(args), ensure_ascii=False))
         return 0
     if args.command == "collection-export":
         from request.reader.collection import export_collection
