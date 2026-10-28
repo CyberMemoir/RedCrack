@@ -44,7 +44,7 @@ class CollectionTests(unittest.TestCase):
             note = {
                 "note_id": ID,
                 "url": f"https://www.xiaohongshu.com/explore/{ID}?xsec_token=private-token",
-                "title": "这是什么梗",
+                "title": "梗科普：这是什么梗",
                 "description": f"来源 https://www.xiaohongshu.com/explore/{OTHER}?xsec_token=private-token",
                 "author_id": "fixture-author",
                 "author": "作者",
@@ -107,6 +107,26 @@ class CollectionTests(unittest.TestCase):
             self.assertEqual((root / "out/media_manifest.jsonl").read_text(), "")
             resumed = export_collection([str(source)], root / "out")
             self.assertEqual(resumed["status"], "blocked_verification")
+
+    def test_name_request_alone_is_not_an_explanation_media_candidate(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            source = root / "note.json"
+            source.write_text(
+                json.dumps(
+                    {
+                        "note_id": ID,
+                        "title": "这是什么梗？",
+                        "description": "#表情包",
+                        "content_scope": "detail",
+                        "media": [{"kind": "image", "url": "https://cdn.invalid/unknown"}],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            result = export_collection([str(source)], root / "out")
+            self.assertEqual(result["new_query_occurrences"], 1)
+            self.assertEqual((root / "out/media_manifest.jsonl").read_text(), "")
 
 
 class RestrictionTests(unittest.IsolatedAsyncioTestCase):

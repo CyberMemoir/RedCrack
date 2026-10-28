@@ -14,7 +14,10 @@ from .export import atomic_write, write_json
 from .models import NOTE_ID, Note, normalize_note_url, note_id_from_url
 
 SCHEMA = "platform-collection-v1"
-EXPLANATION = re.compile(r"是什么梗|什么梗|梗科普|梗来源|梗解读|表情包来源")
+EXPLANATION = re.compile(
+    r"(?:梗|表情包).{0,8}(?:科普|解说|解读|解析)|(?:科普|解说|解读|解析).{0,8}(?:梗|表情包)"
+)
+DEFINITION = re.compile(r"是指|意思是|指的是|源自|出自|来源于")
 LINK = re.compile(r"https?://[^\s<>\"'，。；！？（）【】]+")
 
 
@@ -170,9 +173,10 @@ def convert_note(row: dict, evidence_sha: str, locator: str, keyword: str):
         )
     # Only a rule candidate with proven detail scope can provide OCR/media inputs.
     # URLs stay private; this function does not download or decode any media.
-    if node["content_scope"] == "detail" and EXPLANATION.search(
-        node["title"] + "\n" + node["body"]
-    ):
+    explanation_candidate = bool(EXPLANATION.search(node["title"] + "\n" + node["body"])) or (
+        "什么梗" in node["title"] and bool(DEFINITION.search(node["body"]))
+    )
+    if node["content_scope"] == "detail" and explanation_candidate:
         assets = [
             (f"/media/{index}", asset["kind"], index, asset)
             for index, asset in enumerate(row.get("media") or [])
