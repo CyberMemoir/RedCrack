@@ -22,6 +22,10 @@ python xhs.py collection-export --input downloads/window-01 --output output/exch
 
 ## platform-collection-v1文件
 
+所有公开JSONL记录和JSON根对象使用整数`schema_version: 1`，协议名称单独保存在`schema_name: "platform-collection-v1"`。`edges.from/to`使用`{platform, entity_type, entity_id}`身份对象，并与nodes身份一致；未读取正文的显式链接目标用`content_scope=reference_only`节点表示。导出前检查这些契约。
+
+旧版字符串schema_version导出不原地升级或混写；请对同一批输入指定新的output目录，保留旧导出及原始证据。新目录同输入重跑仍然幂等。离线重导出不是新增采集。
+
 | 文件 | 职责 |
 | --- | --- |
 | `nodes.jsonl` | note/author/tag及正文显式链接到的note身份；canonical URL、原时间、字段、指标和证据定位 |

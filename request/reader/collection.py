@@ -13,7 +13,9 @@ from .analysis import analyze_archives, digest, input_files
 from .export import atomic_write, write_json
 from .models import NOTE_ID, Note, normalize_note_url, note_id_from_url
 
-SCHEMA = "platform-collection-v1"
+SCHEMA_VERSION = 1
+SCHEMA_NAME = "platform-collection-v1"
+SCHEMA = {"schema_version": SCHEMA_VERSION, "schema_name": SCHEMA_NAME}
 EXPLANATION = re.compile(
     r"(?:梗|表情包).{0,8}(?:科普|解说|解读|解析)|(?:科普|解说|解读|解析).{0,8}(?:梗|表情包)"
 )
@@ -23,6 +25,56 @@ LINK = re.compile(r"https?://[^\s<>\"'，。；！？（）【】]+")
 
 def identity(kind: str, entity_id: str) -> dict:
     return {"platform": "xiaohongshu", "entity_type": kind, "entity_id": entity_id}
+
+
+def validate_schema(record: dict) -> None:
+    if (
+        type(record.get("schema_version")) is not int
+        or record["schema_version"] != SCHEMA_VERSION
+        or record.get("schema_name") != SCHEMA_NAME
+    ):
+        raise ValueError(
+            "交换记录需要整数schema_version=1及schema_name=platform-collection-v1；旧导出请使用新目录"
+        )
+
+
+def identity_key(record: dict) -> tuple[str, str, str]:
+    fields = ("platform", "entity_type", "entity_id")
+    if not isinstance(record, dict) or any(
+        not isinstance(record.get(key), str) or not record[key] for key in fields
+    ):
+        raise ValueError("节点及边端点需要platform/entity_type/entity_id身份对象")
+    return tuple(record[key] for key in fields)
+
+
+def validate_graph(nodes: list[dict], edges: list[dict]) -> None:
+    identities = {identity_key(node) for node in nodes}
+    for edge in edges:
+        for endpoint in ("from", "to"):
+            if identity_key(edge.get(endpoint)) not in identities:
+                raise ValueError("边端点身份必须对应导出节点；未采集目标也需reference_only节点")
+
+
+def read_rows(path: Path) -> list[dict]:
+    return (
+        [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line]
+        if path.exists()
+        else []
+    )
+
+
+def validate_existing_export(output: Path) -> tuple[list[dict], list[dict]]:
+    records = {}
+    for name in ("nodes", "edges", "frontier", "media_manifest", "queries"):
+        records[name] = read_rows(output / f"{name}.jsonl")
+        for row in records[name]:
+            validate_schema(row)
+    for name in ("capabilities", "trial_summary", "resume"):
+        path = output / f"{name}.json"
+        if path.exists():
+            validate_schema(json.loads(path.read_text(encoding="utf-8")))
+    validate_graph(records["nodes"], records["edges"])
+    return records["nodes"], records["edges"]
 
 
 def persist_rows(path: Path, additions: list[dict]) -> tuple[int, int]:
@@ -50,7 +102,7 @@ def convert_note(row: dict, evidence_sha: str, locator: str, keyword: str):
     source = identity("note", note_id)
     observed_at = row.get("observed_at")
     common = {
-        "schema_version": SCHEMA,
+        **SCHEMA,
         "observed_at": observed_at,
         "evidence_sha": evidence_sha,
         "locator": locator,
@@ -87,6 +139,7 @@ def convert_note(row: dict, evidence_sha: str, locator: str, keyword: str):
     if node["content_scope"] != "detail":
         frontier.append(
             {
+                **SCHEMA,
                 **source,
                 "action": "detail",
                 "canonical_url": node["canonical_url"],
@@ -165,6 +218,7 @@ def convert_note(row: dict, evidence_sha: str, locator: str, keyword: str):
         )
         frontier.append(
             {
+                **SCHEMA,
                 **target,
                 "action": "detail",
                 "canonical_url": Note(target_id).canonical_url,
@@ -235,7 +289,7 @@ def export_queries(inputs: list[str], output: Path) -> tuple[int, int]:
         evidence = query["evidence"][0]
         rows.append(
             {
-                "schema_version": SCHEMA,
+                **SCHEMA,
                 "query_id": query["query_id"],
                 "platform": "xiaohongshu",
                 "source_id": query["source_id"],
@@ -263,6 +317,7 @@ def export_collection(
     tool_revision: str = "unknown",
 ) -> dict:
     output = Path(output).expanduser().resolve()
+    previous_nodes, previous_edges = validate_existing_export(output)
     files = input_files(inputs, output)
     resume_path = output / "resume.json"
     previous_resume = (
@@ -297,6 +352,7 @@ def export_collection(
             frontier.extend(f)
             media.extend(m)
             access.extend(a)
+    validate_graph(previous_nodes + nodes, previous_edges + edges)
     new_nodes, total_nodes = persist_rows(output / "nodes.jsonl", public_record(nodes))
     new_edges, total_edges = persist_rows(output / "edges.jsonl", public_record(edges))
     persist_rows(output / "frontier.jsonl", public_record(frontier))
@@ -305,7 +361,7 @@ def export_collection(
     write_json(output / "private/inputs.json", manifests)
     new_queries, total_queries = export_queries(inputs, output)
     capabilities = {
-        "schema_version": SCHEMA,
+        **SCHEMA,
         "tool_revision": tool_revision,
         "entries": [
             {
@@ -336,7 +392,7 @@ def export_collection(
     }
     write_json(output / "capabilities.json", capabilities)
     summary = {
-        "schema_version": SCHEMA,
+        **SCHEMA,
         "recorded_at": datetime.now(UTC).isoformat(),
         "status": blocked["status"] if blocked else "partial",
         "reason": "unresolved_access_pause"
@@ -359,7 +415,7 @@ def export_collection(
     write_json(
         output / "resume.json",
         {
-            "schema_version": SCHEMA,
+            **SCHEMA,
             "node_versions": total_nodes,
             "edges": total_edges,
             "seen_exported_identities": sorted(
