@@ -144,7 +144,10 @@ async def run_reader(engine, recipe, *, reader_factory=XHSReader, sample_mode="l
                     if current["action"]["action_type"] == "detail":
                         wanted = note_id_from_url(current["action"]["query"])
                         if wanted not in state["detail_done"]:
-                            if spec.get("source_access"):
+                            if (
+                                spec.get("source_access")
+                                and "xsec_token=" in spec["source_access"]["access"]["url"]
+                            ):
                                 entry = spec["source_access"]
                                 reader.cache.put(
                                     "access",
