@@ -1,4 +1,4 @@
-"""Durable platform action handoff and offline cursor-driver execution.
+"""Durable action handoff for normal reader heads and offline cursor fixtures.
 
 This is a platform adapter spool, not the central family/task scheduler. Production
 search cursor replay remains unsupported; fixture tokens are never sent online.
@@ -49,8 +49,11 @@ def worker_lock(root):
 
 
 def validate_action(action):
-    if action.get("action_type") != "search" or action.get("target_platform") != "xiaohongshu":
-        raise ValueError("This adapter only accepts Xiaohongshu search actions")
+    if (
+        action.get("action_type") not in {"search", "detail"}
+        or action.get("target_platform") != "xiaohongshu"
+    ):
+        raise ValueError("This adapter accepts Xiaohongshu search or explicit detail actions")
     uuid.UUID(action["family_id"])
     if (
         action.get("purpose") not in PURPOSES
@@ -62,7 +65,7 @@ def validate_action(action):
         raise ValueError("Action must retain nonempty evidence_refs")
     if action.get("query_layer") != "rule_seed" or action.get("is_actual_search_log") is not False:
         raise ValueError("Rule actions are rule_seed, not actual search logs")
-    return {
+    result = {
         key: action[key]
         for key in (
             "action_type",
@@ -75,6 +78,9 @@ def validate_action(action):
             "is_actual_search_log",
         )
     } | {"anchors": action.get("anchors", []), "priority": action.get("priority", 0)}
+    if "xhs_anchor" in action:
+        result["xhs_anchor"] = action["xhs_anchor"]
+    return result
 
 
 class FamilyActions:
@@ -109,6 +115,8 @@ class FamilyActions:
 
     def enqueue(self, action, fixture, mode):
         action = validate_action(action)
+        if action["action_type"] != "search":
+            raise ValueError("Page fixtures only support search; direct detail uses normal reader")
         if mode not in {"head", "history"}:
             raise ValueError("Expected head or history mode")
         body = Path(fixture).read_bytes()
@@ -129,6 +137,9 @@ class FamilyActions:
             if key in cursors or page["outcome"] not in OUTCOMES:
                 raise ValueError("Duplicate cursor or invalid reader outcome")
             cursors.add(key)
+        return self.save_recipe(action, body, mode)
+
+    def save_recipe(self, action, body, mode):
         fixture_sha = sha256(body)
         snapshot = self.root / "fixtures" / (fixture_sha + ".json")
         atomic_write(snapshot, body.decode("utf-8"))
@@ -310,9 +321,15 @@ class FamilyActions:
         return self.status(recipe)
 
 
-def action_cli(args):
+async def action_cli(args):
     engine = FamilyActions(args.state_dir)
     if args.operation == "enqueue":
+        if args.reader_profile:
+            from .family_reader import enqueue_reader
+
+            return enqueue_reader(
+                engine, json.loads(Path(args.action).read_text(encoding="utf-8")), args
+            )
         return engine.enqueue(
             json.loads(Path(args.action).read_text(encoding="utf-8")), args.fixture, args.mode
         )
@@ -323,6 +340,16 @@ def action_cli(args):
 
         previous = signal.signal(signal.SIGTERM, interrupted)
         try:
+            current = engine.status(args.recipe_id)
+            descriptor = json.loads(
+                (engine.root / "fixtures" / (current["fixture_sha"] + ".json")).read_text(
+                    encoding="utf-8"
+                )
+            )
+            if descriptor.get("schema_name") == "xhs-normal-reader-job-v1":
+                from .family_reader import run_reader
+
+                return await run_reader(engine, args.recipe_id)
             return engine.run(args.recipe_id, args.max_pages)
         finally:
             signal.signal(signal.SIGTERM, previous)
