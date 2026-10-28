@@ -96,7 +96,7 @@ python xhs.py family-anchor --input anchor.json --directory output/anchor-action
 # 对输出action文件逐个按原有有界family-action enqueue/run执行；原暂停保持
 ```
 
-source_hint支持url/named/phrase；有明确小红书链接就产生优先的detail动作，直接调用get_note并核对同ID，不先搜索或补造卡片观察。其他路线的URL留deferred gap，原hint保留；具名来源和原句用原值检索。没有source_hint就missing_source，不猜源头。token不进公开动作，既有私有访问缓存/来源引用仍由reader正常恢复，缺失则保留真实失败而不猜token。
+source_hint支持url/named/phrase；有明确小红书链接就产生优先的detail动作，直接调用get_note并核对同ID，不先搜索或补造卡片观察。其他路线的URL留deferred gap，原hint保留；具名来源和原句用原值检索。没有source_hint就missing_source，不猜源头。token不进公开动作；原提示中的完整链接只保存在输出目录private/source-access.json及私有plan，行动持有SHA引用。enqueue读取同目录私有映射并核对note ID/SHA，再恢复原reader访问缓存；缺映射或身份不符即停止，不猜token。CLI标准输出不打印私有映射或原hint。
 
 别称/原句原样生成find_independent_uses动作，role_candidates可以同时含derivative和usage，relation_status始终candidate_not_confirmed；弱关联不丢弃，也不强判父边。new_name_leads只保存在plan的bilibili_review_leads，不生成family。CLI仅写计划和动作，不访问网络或自动提交中央队列。
 

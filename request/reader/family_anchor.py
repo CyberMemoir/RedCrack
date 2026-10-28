@@ -26,7 +26,7 @@ def anchor_actions(anchor):
     roles = anchor.get("roles", ["derivative", "usage"])
     if not roles or set(roles) - {"source", "derivative", "usage"}:
         raise ValueError("Unknown anchor material role")
-    actions, gaps = [], []
+    actions, gaps, private_access = [], [], {}
     context = {
         "explainer": explainer,
         "role_candidates": [r for r in roles if r != "source"],
@@ -77,6 +77,12 @@ def anchor_actions(anchor):
                 note_id = None
             if note_id:
                 canonical = Note(note_id).canonical_url
+                entry = {
+                    "note_id": note_id,
+                    "access": {"url": normalize_note_url(hint["value"]), "method": "navigate"},
+                }
+                access_ref = sha256(encoded(entry))
+                private_access[access_ref] = entry
                 actions.insert(
                     0,
                     action(
@@ -87,6 +93,7 @@ def anchor_actions(anchor):
                         | {
                             "role_candidates": ["source"],
                             "source_hint": {"kind": "url", "value": canonical},
+                            "source_access_ref": access_ref,
                         },
                     ),
                 )
@@ -104,20 +111,28 @@ def anchor_actions(anchor):
         "creates_family": False,
         "source_hint": anchor.get("source_hint"),
         "contract_scope": "platform_local_input_conversion_not_central_schema",
+        "private_source_access": private_access,
     }
 
 
 def anchor_cli(args):
     plan = anchor_actions(json.loads(Path(args.input).read_text(encoding="utf-8")))
+    public_plan = {
+        key: value
+        for key, value in plan.items()
+        if key not in {"private_source_access", "source_hint"}
+    }
     directory = Path(args.directory)
     if directory.exists():
         saved = directory / "plan.json"
         if saved.exists() and json.loads(saved.read_text(encoding="utf-8")) == plan:
-            return plan
+            return public_plan
         raise ValueError(
             "Anchor action directory differs; choose a new directory to avoid stale actions"
         )
     for action in plan["actions"]:
         write_json(directory / ("action-" + sha256(encoded(action)) + ".json"), action)
+    if plan["private_source_access"]:
+        write_json(directory / "private/source-access.json", plan["private_source_access"])
     write_json(directory / "plan.json", plan)
-    return plan
+    return public_plan

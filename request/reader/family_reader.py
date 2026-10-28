@@ -45,6 +45,23 @@ def enqueue_reader(engine, action, args):
         "detail_limit": args.detail_limit,
         "max_scrolls": args.max_scrolls,
     }
+    source_ref = action.get("xhs_anchor", {}).get("source_access_ref")
+    if source_ref:
+        mapping = json.loads(
+            (Path(args.action).resolve().parent / "private/source-access.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        entry = mapping[source_ref]
+        if (
+            sha256(encoded(entry)) != source_ref
+            or entry["note_id"] != note_id_from_url(action["query"])
+            or note_id_from_url(normalize_note_url(entry["access"]["url"])) != entry["note_id"]
+        ):
+            raise ValueError(
+                "Explicit source access reference has changed or belongs to another note"
+            )
+        descriptor["source_access"] = entry
     return engine.save_recipe(action, encoded(descriptor), "head")
 
 
@@ -127,6 +144,19 @@ async def run_reader(engine, recipe, *, reader_factory=XHSReader, sample_mode="l
                     if current["action"]["action_type"] == "detail":
                         wanted = note_id_from_url(current["action"]["query"])
                         if wanted not in state["detail_done"]:
+                            if spec.get("source_access"):
+                                entry = spec["source_access"]
+                                reader.cache.put(
+                                    "access",
+                                    wanted,
+                                    [
+                                        Note(
+                                            wanted,
+                                            url=entry["access"]["url"],
+                                            access=entry["access"],
+                                        )
+                                    ],
+                                )
                             detail = await controlled(
                                 reader.get_note(current["action"]["query"]), engine, recipe
                             )

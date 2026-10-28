@@ -131,6 +131,41 @@ class FamilyReaderTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(records[0]["metrics"], {"likes": "1.2万"})
         self.assertEqual(records[0]["metrics_observed_at"], detail.observed_at)
 
+    async def test_direct_anchor_restores_private_explicit_link_without_publishing_token(self):
+        from request.reader.family_anchor import anchor_cli
+
+        source = self.root / "anchor.json"
+        source.write_text(
+            json.dumps(
+                {
+                    "family_id": ACTION["family_id"],
+                    "explainer": {"work_id": "bilibili:BV1234567890"},
+                    "evidence_refs": ACTION["evidence_refs"],
+                    "roles": ["source"],
+                    "source_hint": {"kind": "url", "value": self.card().url},
+                }
+            ),
+            encoding="utf-8",
+        )
+        plan = anchor_cli(
+            argparse.Namespace(input=str(source), directory=str(self.root / "actions"))
+        )
+        self.assertNotIn("fixture-private-token", json.dumps(plan))
+        path = next((self.root / "actions").glob("action-*.json"))
+        self.args.action = str(path)
+        recipe = enqueue_reader(self.engine, plan["actions"][0], self.args)["id"]
+
+        async def detail(reader, url):
+            saved = reader.cache.get("access", ID)[0]
+            self.assertEqual(saved.access["url"], self.card().url)
+            result = self.card()
+            result.content_scope = "detail"
+            return result
+
+        with patch.object(XHSReader, "get_note", detail):
+            result = await run_reader(self.engine, recipe, sample_mode="fixture")
+        self.assertEqual(self.records(result)[0][0]["content_scope"], "detail")
+
     async def test_existing_pause_stops_before_reader_construction(self):
         profile = Path(self.args.reader_profile)
         profile.mkdir()
