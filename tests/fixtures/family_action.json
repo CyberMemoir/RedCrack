@@ -1,0 +1,12 @@
+{
+  "action_type": "search",
+  "target_platform": "xiaohongshu",
+  "family_id": "00000000-0000-4000-8000-000000000001",
+  "purpose": "find_independent_uses",
+  "query": "合成甲表达",
+  "anchors": ["合成甲表达"],
+  "priority": 1,
+  "evidence_refs": [{"sample_mode": "fixture", "evidence_id": "synthetic-seed", "locator": "/query"}],
+  "query_layer": "rule_seed",
+  "is_actual_search_log": false
+}
