@@ -60,6 +60,13 @@ def _browser_args(parser: argparse.ArgumentParser) -> None:
         help="滚动/读取笔记的间隔秒数（非安全阈值）",
     )
     parser.add_argument("--refresh", action="store_true", help="明确刷新缓存，重新访问计入预算")
+    parser.add_argument(
+        "--connect-existing", action="store_true", help="经Chrome授权复用已打开的正常Chrome会话"
+    )
+    parser.add_argument(
+        "--chrome-data-dir",
+        help="现有Chrome数据根目录；Windows默认使用正常Chrome目录，只读连接入口",
+    )
 
 
 def _output_args(parser: argparse.ArgumentParser) -> None:
@@ -117,6 +124,20 @@ def build_parser() -> argparse.ArgumentParser:
         "--profile", default=str(Path.home() / ".redcrack" / "xhs_reader_profile")
     )
     acknowledge.add_argument("--reason", required=True, help="已人工检查/处理的情况")
+    analyze = sub.add_parser("analyze", help="离线规则提取人的需求原句、去重与统计；不访问平台")
+    analyze.add_argument(
+        "--input", action="append", required=True, help="results.json、note.json或归档目录，可重复"
+    )
+    analyze.add_argument("--output", "-o", required=True, help="独立分析输出目录")
+    collection = sub.add_parser(
+        "collection-export", help="离线转换platform-collection-v1节点、边、能力与续跑材料"
+    )
+    collection.add_argument("--input", action="append", required=True)
+    collection.add_argument("--output", "-o", required=True)
+    collection.add_argument("--pause-record", help="已有访问暂停状态JSON；不清除暂停")
+    collection.add_argument(
+        "--tool-revision", default="unknown", help="导出工具提交版本；未知不推造"
+    )
     return parser
 
 
@@ -289,6 +310,27 @@ async def _download_batch(
 
 
 async def _run(args: argparse.Namespace) -> int:
+    if args.command == "collection-export":
+        from request.reader.collection import export_collection
+
+        print(
+            json.dumps(
+                export_collection(
+                    args.input,
+                    args.output,
+                    pause_record=args.pause_record,
+                    tool_revision=args.tool_revision,
+                ),
+                ensure_ascii=False,
+            )
+        )
+        return 0
+    if args.command == "analyze":
+        from request.reader.analysis import analyze_archives
+
+        result = analyze_archives(args.input, args.output)
+        print(json.dumps(result, ensure_ascii=False))
+        return 0
     if args.command == "acknowledge-warning":
         AccessPause(Path(args.profile).expanduser().resolve()).acknowledge(args.reason)
         progress("已记录人工确认；未访问平台，不保证平台限制已解除。")
@@ -319,6 +361,8 @@ async def _run(args: argparse.Namespace) -> int:
         interval=args.interval,
         refresh=args.refresh,
         evidence_dir=(Path(args.output) / "evidence" if hasattr(args, "output") else None),
+        connect_existing=args.connect_existing,
+        chrome_data_dir=args.chrome_data_dir,
     ) as reader:
         if args.command == "login":
             progress("请在打开的小红书窗口完成扫码登录…")

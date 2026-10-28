@@ -51,6 +51,20 @@ class SourceIdentityTests(unittest.TestCase):
 
 
 class FailureStateTests(unittest.IsolatedAsyncioTestCase):
+    async def test_driver_start_timeout_releases_profile_lock(self):
+        with tempfile.TemporaryDirectory() as folder:
+            reader = XHSReader(folder, timeout_ms=20)
+
+            async def hang():
+                await asyncio.Event().wait()
+
+            with patch("playwright.async_api.async_playwright") as driver:
+                driver.return_value.start = AsyncMock(side_effect=hang)
+                with self.assertRaises(NetworkReadError):
+                    await reader.start()
+            self.assertIsNone(reader.runtime.handle)
+            self.assertIsNone(reader.context)
+
     async def test_navigation_403_pauses_before_parsing_or_retry(self):
         with tempfile.TemporaryDirectory() as folder:
             reader = XHSReader(folder, interval=0)
