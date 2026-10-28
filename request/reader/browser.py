@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import sys
 import time
 from collections.abc import Callable
 from pathlib import Path
@@ -13,12 +14,15 @@ from .access import AccessPause
 from .cache import NoteCache
 from .errors import LoginRequiredError, NetworkReadError, ReaderError
 from .evidence import EvidenceArchive
+from .existing import existing_chrome_endpoint
 from .models import (
+    NOTE_HOSTS,
     SHORT_HOSTS,
     Note,
     normalize_note_url,
     note_id_from_url,
     parse_note,
+    parse_visible_card,
 )
 from .runtime import ProfileRuntime
 
@@ -26,7 +30,16 @@ HOME_URL = "https://www.xiaohongshu.com/explore"
 SEARCH_PATH = "/api/sns/web/v1/search/notes"
 FEED_PATH = "/api/sns/web/v1/feed"
 HOMEFEED_PATH = "/api/sns/web/v1/homefeed"
-WARNING_MARKERS = ("真人操作习惯", "操作过于频繁", "访问过于频繁", "异常访问", "非正常访问")
+WARNING_MARKERS = (
+    "真人操作习惯",
+    "操作过于频繁",
+    "访问过于频繁",
+    "异常访问",
+    "非正常访问",
+    "设备超限",
+    "登录设备超",
+    "设备数量已达",
+)
 
 READ_STATE = """() => {
     const s = window.__INITIAL_STATE__ || {};
@@ -45,7 +58,9 @@ READ_CARDS = """() => Array.from(document.querySelectorAll('section.note-item'))
     if (!link) return null;
     const title = card.querySelector('.title');
     const author = card.querySelector('.author .name, .author-wrapper .name');
-    return {url: link.href, title: title?.textContent?.trim() || '',
+    return {url: link.href,
+            links: Array.from(card.querySelectorAll('a[href]')).map(a => a.href),
+            title: title?.textContent?.trim() || '',
             author: author?.textContent?.trim() || ''};
 }).filter(Boolean)"""
 
@@ -63,6 +78,8 @@ class XHSReader:
         interval: float = 15,
         refresh: bool = False,
         evidence_dir: str | Path | None = None,
+        connect_existing: bool = False,
+        chrome_data_dir: str | Path | None = None,
     ) -> None:
         if timeout_ms <= 0 or interval < 0:
             raise ValueError("timeout 必须大于 0，interval 不能为负数")
@@ -75,6 +92,11 @@ class XHSReader:
         self.browser_channel = browser_channel
         self.timeout_ms = timeout_ms
         self.interval = interval
+        if chrome_data_dir is not None and not connect_existing:
+            raise ValueError("--chrome-data-dir 仅用于 --connect-existing")
+        self.connect_existing = connect_existing
+        self.chrome_data_dir = chrome_data_dir
+        self._attached_browser: Any = None
         self._playwright: Any = None
         self.context: Any = None
         self.page: Any = None
@@ -86,6 +108,7 @@ class XHSReader:
         self.evidence = EvidenceArchive(Path(evidence_dir or self.profile_dir / "reader-evidence"))
         self._payload_evidence: dict[int, dict] = {}
         self.list_end_reason: str | None = None
+        self._source_card_open = False
 
     async def __aenter__(self) -> XHSReader:
         self.access_pause.check()
@@ -100,13 +123,46 @@ class XHSReader:
         self.runtime.acquire()
         if self.context:
             return
+        endpoint = None
+        if self.connect_existing:
+            try:
+                endpoint = existing_chrome_endpoint(self.chrome_data_dir)
+            except (ReaderError, OSError):
+                self.runtime.close()
+                raise
         try:
             from playwright.async_api import Error, async_playwright
         except ImportError as exc:
             self.runtime.close()
             raise ReaderError("请先安装依赖：pip install -r requirements-reader.txt") from exc
         self.profile_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
-        self._playwright = await async_playwright().start()
+        try:
+            self._playwright = await asyncio.wait_for(
+                async_playwright().start(), self.timeout_ms / 1000
+            )
+        except TimeoutError as exc:
+            self.runtime.close()
+            raise NetworkReadError("浏览器控制服务启动超时；未发起平台访问") from exc
+        if self.connect_existing:
+            try:
+                print("等待Chrome连接许可：如出现弹窗，请点击允许。", file=sys.stderr, flush=True)
+                self._attached_browser = await self._playwright.chromium.connect_over_cdp(
+                    endpoint, timeout=self.timeout_ms
+                )
+                if not self._attached_browser.contexts:
+                    raise ReaderError("已连接Chrome但没有可复用的浏览器会话")
+                self.context = self._attached_browser.contexts[0]
+                self.page = await self.context.new_page()
+                self.page.set_default_timeout(self.timeout_ms)
+                self.page.on("response", self._capture_response)
+                self.runtime.event("existing_chrome_connected")
+                return
+            except Error as exc:
+                await self.close()
+                raise NetworkReadError("连接现有Chrome失败；请检查远程调试开关及连接授权") from exc
+            except BaseException:
+                await self.close()
+                raise
         channels = (
             ["chrome", None]
             if self.browser_channel == "auto"
@@ -148,10 +204,14 @@ class XHSReader:
 
     async def close(self) -> None:
         try:
-            if self.context:
+            if self.connect_existing:
+                if self.page:
+                    await self.page.close()
+            elif self.context:
                 await self.context.close()
         finally:
             self.context = self.page = None
+            self._attached_browser = None
             try:
                 if self._playwright:
                     await self._playwright.stop()
@@ -177,6 +237,12 @@ class XHSReader:
         payloads = []
         while not self._responses.empty():
             response = self._responses.get_nowait()
+            if response.status in (403, 412, 429, 461, 471, 567):
+                self.evidence.save(
+                    "access-restriction",
+                    {"path": urlsplit(response.url).path, "http_status": response.status},
+                )
+                await self._stop_access(f"网页返回访问限制（HTTP {response.status}）")
             if urlsplit(response.url).path != path:
                 continue
             if keyword:
@@ -186,11 +252,6 @@ class XHSReader:
                     request_data = {}
                 if request_data.get("keyword") not in (None, keyword):
                     continue
-            if response.status in (403, 412, 429, 461, 471):
-                self.evidence.save(
-                    "access-restriction", {"path": path, "http_status": response.status}
-                )
-                await self._stop_access(f"网页返回访问限制（HTTP {response.status}）")
             if response.status == 401:
                 raise LoginRequiredError("登录已失效，请运行 python xhs.py login")
             if response.status >= 400:
@@ -254,7 +315,7 @@ class XHSReader:
                 )
                 if response is not None:
                     status = response.status
-                    if status in (403, 412, 429, 461, 471):
+                    if status in (403, 412, 429, 461, 471, 567):
                         self.evidence.save(
                             "access-restriction",
                             {"path": urlsplit(url).path, "http_status": status},
@@ -452,6 +513,19 @@ class XHSReader:
                         note = parse_note(item)
                     except ReaderError:
                         continue
+                    if (
+                        cache_kind == "search"
+                        and "xsec_token=" in note.url
+                        and "xsec_source=" not in note.url
+                    ):
+                        note.url += "&xsec_source=pc_search"
+                    note.access = {
+                        "url": note.url,
+                        "source_url": self.page.url,
+                        "method": "navigate" if "xsec_token=" in note.url else "source_card",
+                    }
+                    note.content_scope = "search_card"
+                    self.cache.put("access", note.note_id, [note])
                     found[note.note_id] = self._attach_evidence(
                         note, reference, f"/data/items/{index}"
                     )
@@ -465,16 +539,21 @@ class XHSReader:
                 raise NetworkReadError("可见搜索卡片读取超时，停止当前任务") from exc
             for card in cards:
                 try:
-                    url = normalize_note_url(card["url"])
+                    visible = parse_visible_card(card, source_url=self.page.url)
                 except ValueError:
                     continue
-                note_id = note_id_from_url(url)
+                note_id = visible.note_id
                 if note_id and note_id not in found:
                     found[note_id] = self._attach_evidence(
-                        Note(note_id, title=card["title"], author=card["author"], url=url),
+                        visible,
                         self.evidence.save("visible-card", card),
                         "",
                     )
+                    self.cache.put("access", note_id, [found[note_id]])
+                elif note_id in found and "xsec_token=" not in found[note_id].url:
+                    found[note_id].url = visible.url
+                    found[note_id].access = visible.access
+                    self.cache.put("access", note_id, [found[note_id]])
             notes = list(found.values())[:limit]
             if on_progress and len(found) != before:
                 on_progress(notes)
@@ -526,8 +605,25 @@ class XHSReader:
             return cached[0]
         await self.start()
         self._clear_responses()
-        await self._goto(url, kind="detail")
+        access_rows = self.cache.get("access", cache_key)
+        access = access_rows[0].access if access_rows else {}
+        if "xsec_token=" not in url and access.get("method") == "source_card":
+            await self._open_source_card(url, access)
+        else:
+            if access.get("url"):
+                captured = normalize_note_url(access["url"])
+                if note_id_from_url(captured) == cache_key and (
+                    "xsec_token=" not in url or captured == url
+                ):
+                    url = access["url"]
+            await self._goto(url, kind="detail")
         note = await self._read_note(url)
+        note.content_scope = "detail"
+        note.access = {
+            "url": url,
+            "source_url": access.get("source_url"),
+            "method": access.get("method", "navigate"),
+        }
         # Only explicit tracks attached to the normal page's video element.
         # Absence means not observed; never invoke OCR/ASR or infer a track URL.
         tracks = await self.page.locator("video track[src]").evaluate_all(
@@ -542,6 +638,28 @@ class XHSReader:
         self.runtime.event("detail_saved", note_id=note.note_id)
         return note
 
+    async def _open_source_card(self, url: str, access: dict) -> None:
+        source = access.get("source_url", "")
+        parts = urlsplit(source)
+        if parts.hostname not in NOTE_HOSTS or parts.path not in ("/search_result", "/explore"):
+            raise ReaderError("缺少有效来源页，不能把无访问参数的canonical URL当详情入口")
+        if self.page.url != source or self._source_card_open:
+            await self._goto(source, kind="search")
+            self._source_card_open = False
+        wanted = note_id_from_url(url)
+        link = self.page.locator(f'section.note-item a[href*="/{wanted}"]').first
+        from playwright.async_api import Error
+
+        try:
+            await link.wait_for(state="visible", timeout=self.timeout_ms)
+        except Error as exc:
+            await self._check_access(require_login=True)
+            raise ReaderError("原来源页未显示目标笔记卡片，保留访问缺口，不猜其他链接") from exc
+        await self.runtime.before("detail", self.access_pause.check)
+        await self._check_access(require_login=True)
+        await link.click(timeout=self.timeout_ms)
+        self._source_card_open = True
+
     async def _read_note(self, url: str) -> Note:
         deadline = time.monotonic() + self.timeout_ms / 1000
         while time.monotonic() < deadline:
@@ -552,18 +670,19 @@ class XHSReader:
                 continue
             try:
                 resolved = normalize_note_url(current_url)
-            except ValueError as exc:
-                raise ReaderError("笔记链接跳转到非笔记页面，可能已经删除或不可访问") from exc
-            wanted = note_id_from_url(resolved) or note_id_from_url(url)
+            except ValueError:
+                resolved = ""
+            wanted = note_id_from_url(url) or note_id_from_url(resolved)
             original_id = note_id_from_url(url)
-            if original_id and wanted != original_id:
+            resolved_id = note_id_from_url(resolved)
+            if original_id and resolved_id and resolved_id != original_id:
                 raise ReaderError("笔记跳转后的 ID 与请求不一致，不关联到原来源")
             # 保留原链接中的 token，即使网页路由移除了 query。
             source_url = (
                 url
                 if note_id_from_url(url) == wanted
                 and parse_qs(urlsplit(url).query).get("xsec_token")
-                else resolved
+                else resolved or url
             )
             for payload in await self._payloads(FEED_PATH):
                 data = payload.get("data") or {}
@@ -599,4 +718,6 @@ class XHSReader:
             for message in ("当前笔记暂时无法浏览", "笔记已删除", "笔记不存在"):
                 if await self.page.get_by_text(message, exact=False).first.is_visible():
                     raise ReaderError(message + "；请使用包含 xsec_token 的完整分享链接")
+            if not resolved and urlsplit(current_url).path not in ("/search_result", "/explore"):
+                raise ReaderError("笔记链接跳转到非笔记页面，未取得匹配ID的详情")
         raise NetworkReadError("笔记详情等待超时；未取得详情，停止当前任务")

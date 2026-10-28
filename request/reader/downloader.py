@@ -129,7 +129,7 @@ class MediaDownloader:
                 url = validate_media_url(urljoin(url, location))
             else:
                 raise DownloadError("媒体重定向次数过多")
-            if response.status in (403, 412, 429, 461, 471):
+            if response.status in (403, 412, 429, 461, 471, 567):
                 reason = f"媒体服务器访问限制（HTTP {response.status}）"
                 if self.on_restriction:
                     await self.on_restriction(reason)

@@ -162,11 +162,27 @@ CLI 原材料保存在输出目录的 `evidence/`；Python 默认在 profile 的
 
 ## 登录与适配
 
+已在正常Chrome登录时，可以使用`--connect-existing`连接该会话，Chrome连接弹窗需用户允许。
+工具只新建并关闭自己的采集标签页，不启动独立浏览器、不复制Cookie。自定义Chrome目录通过
+`--chrome-data-dir`指定；原`--profile`仍用于预算/缓存/暂停。设置与边界见[复用现有Chrome](docs/existing-chrome.md)。
+
 - 搜索模块和原有发布模块使用**不同 profile**，需要各自登录。不要同时用两个进程打开同一个 profile。
 - 登录过期时执行 `python xhs.py login`。遇到页面验证时停止本次任务，在有窗口模式下处理后再执行；不会自动解验证码。
 - 读取的是当前网页提供的媒体版本，不声称为原图、无水印或所有视频格式；仅有 HLS/DASH 的视频会报告未支持，不会把封面冒充视频下载成功。
 - 搜索结果按网页默认相关性排序；没有提供时间范围、作者主页全集、评论采集或定时调度功能。
 - 小红书网页不是稳定的公共 API，字段和选择器变化后可能需要更新 `request/reader/browser.py` 与 `models.py`。
+
+## 离线0 AI分析
+
+持续关联采集可追加运行`collection-export`，向共享采集服务提供`platform-collection-v1`节点、发现边、能力/暂停状态、私有访问引用和讲解媒体manifest。用法与职责见[关联采集接口](docs/associated-collection.md)。
+
+```powershell
+python xhs.py analyze --input downloads/batch -o output/analysis
+```
+
+从已保存的标题/正文规则提取求素材、问名称等人的原句，保留来源、原文位置和指纹，
+按作品/观察去重并导出JSONL及Excel可读CSV统计。全程不启动浏览器、不调用模型。
+多批次可重复传入`--input`。规则、输出文件与统计口径见[离线分析](docs/offline-analysis.md)。
 
 ## Python 调用
 

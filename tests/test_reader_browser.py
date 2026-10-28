@@ -72,6 +72,10 @@ class BrowserIntegrationTests(unittest.IsolatedAsyncioTestCase):
                     html = "<main>loading</main>"
                 elif self.mode == "dom":
                     html = f'<section class="note-item"><a href="/explore/{ID}?xsec_token=dom-token"></a><span class="title">DOM 备用卡片</span><span class="author"><span class="name">作者</span></span></section>'
+                elif self.mode == "source-card":
+                    html = f"""<section class="note-item"><a href="/explore/{ID}"
+                    onclick="event.preventDefault();fetch('/api/sns/web/v1/feed',{{method:'POST'}})">open</a>
+                    <span class="title">搜索封面</span><span class="author"><span class="name">作者</span></span></section>"""
                 else:
                     html = """<body style="height:10000px"><h1>Fixture Search</h1><script>
                     let page=0;
@@ -102,6 +106,7 @@ class BrowserIntegrationTests(unittest.IsolatedAsyncioTestCase):
                 return
             await route.abort()
 
+        self.route_handler = route_handler
         await self.reader.context.route("**/*", route_handler)
 
     async def asyncTearDown(self):
@@ -176,6 +181,44 @@ class BrowserIntegrationTests(unittest.IsolatedAsyncioTestCase):
         note = await self.reader.get_note("http://xhslink.com/a/fixture")
         self.assertEqual(note.note_id, ID)
         self.assertIn("xsec_token=fixture", note.url)
+
+    async def test_tokenless_source_card_opens_matching_detail_without_route_change(self):
+        self.mode = "source-card"
+        self.reader.timeout_ms = 10000
+        cards = await self.reader.search("咖啡", limit=1, max_scrolls=0)
+        self.assertEqual(cards[0].content_scope, "search_card")
+        self.assertEqual(cards[0].access["method"], "source_card")
+        note = await self.reader.get_note(cards[0].url)
+        self.assertEqual(note.note_id, ID)
+        self.assertEqual(note.content_scope, "detail")
+        self.assertEqual(len(note.media), 2)
+        self.assertIn("第二行", note.description)
+        self.assertIn("/search_result?", self.reader.page.url)
+
+    async def test_source_card_access_survives_reader_restart_and_detail_cache_deduplicates(self):
+        self.mode = "source-card"
+        self.reader.timeout_ms = 10000
+        cards = await self.reader.search("咖啡", limit=1, max_scrolls=0)
+        await self.reader.close()
+        self.reader = XHSReader(
+            self.folder.name,
+            headless=True,
+            browser_channel=os.environ.get("REDCRACK_TEST_BROWSER", "chromium"),
+            timeout_ms=10000,
+            interval=0.05,
+        )
+        await self.reader.start()
+        await self.reader.context.route("**/*", self.route_handler)
+        note = await self.reader.get_note(cards[0].url)
+        self.assertEqual(note.note_id, ID)
+        await self.reader.close()
+        self.reader = XHSReader(self.folder.name)
+        with patch.object(
+            self.reader, "start", AsyncMock(side_effect=AssertionError("must use cache"))
+        ):
+            cached = await self.reader.get_note(cards[0].url)
+        self.assertTrue(cached.cached)
+        self.assertEqual(cached.observed_at, note.observed_at)
 
     async def test_visible_behavior_warning_stops_before_next_navigation(self):
         await self.reader.page.goto("https://www.xiaohongshu.com/explore")

@@ -94,6 +94,9 @@ class Note:
     cached: bool = False
     evidence: list[dict[str, Any]] = field(default_factory=list)
     subtitle_tracks: list[dict[str, str]] = field(default_factory=list)
+    access: dict[str, Any] = field(default_factory=dict)
+    tag_refs: list[dict[str, str]] = field(default_factory=list)
+    content_scope: str = "unknown"
 
     @property
     def canonical_url(self) -> str:
@@ -120,7 +123,18 @@ def parse_note(item: dict, *, fallback_url: str = "") -> Note:
         else f"https://www.xiaohongshu.com/explore/{note_id}"
     )
     if token:
-        url = f"https://www.xiaohongshu.com/explore/{note_id}?{urlencode({'xsec_token': token, 'xsec_source': 'pc_search'})}"
+        # A response token belongs to this ID; retain a known source rather than
+        # silently relabelling detail/feed access as search access.
+        source = parse_qs(urlsplit(url).query).get("xsec_source", [""])[0]
+        source = (
+            source
+            or _get(item, "xsec_source", "xsecSource")
+            or _get(card, "xsec_source", "xsecSource")
+        )
+        query = {"xsec_token": token}
+        if source:
+            query["xsec_source"] = source
+        url = f"https://www.xiaohongshu.com/explore/{note_id}?{urlencode(query)}"
     user = card.get("user") or {}
     media: list[MediaAsset] = []
     images = _get(card, "image_list", "imageList", default=[]) or []
@@ -180,6 +194,43 @@ def parse_note(item: dict, *, fallback_url: str = "") -> Note:
         stats=stats,
         published_at=_get(card, "time", "publish_time", "publishTime", default=None),
         media=unique,
+        tag_refs=[
+            {"id": str(_get(tag, "id", "tag_id", "tagId")), "name": str(tag.get("name") or "")}
+            for tag in raw_tags
+            if isinstance(tag, dict) and _get(tag, "id", "tag_id", "tagId")
+        ],
+    )
+
+
+def parse_visible_card(card: dict, *, source_url: str) -> Note:
+    """Choose a same-ID access link; preserve source-card navigation privately."""
+    original = normalize_note_url(card["url"])
+    wanted = note_id_from_url(original)
+    links = []
+    for candidate in card.get("links", [original]):
+        try:
+            url = normalize_note_url(candidate)
+        except ValueError:
+            continue
+        if note_id_from_url(url) == wanted:
+            links.append((url, candidate))
+    chosen, original_access = next(
+        ((url, raw) for url, raw in links if parse_qs(urlsplit(url).query).get("xsec_token")),
+        (original, card["url"]),
+    )
+    return Note(
+        wanted,
+        title=card["title"],
+        author=card["author"],
+        url=chosen,
+        content_scope="search_card",
+        access={
+            "url": original_access,
+            "source_url": source_url,
+            "method": "navigate"
+            if parse_qs(urlsplit(chosen).query).get("xsec_token")
+            else "source_card",
+        },
     )
 
 

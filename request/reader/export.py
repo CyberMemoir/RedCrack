@@ -78,6 +78,7 @@ def export_notes(
     writer.writeheader()
     for note in notes:
         row = {key: getattr(note, key) for key in fields if hasattr(note, key)}
+        row["url"] = note.canonical_url
         row.update(note.stats)
         row["tags"] = ", ".join(note.tags)
         row["media_count"] = len(note.media)
@@ -87,7 +88,7 @@ def export_notes(
 
 def write_note(note: Note, directory: Path) -> None:
     write_json(directory / "note.json", note.to_dict())
-    markdown = f"# {note.title or note.note_id}\n\n作者：{note.author}\n\n来源：{note.url}\n\n{note.description}\n"
+    markdown = f"# {note.title or note.note_id}\n\n作者：{note.author}\n\n来源：{note.canonical_url}\n\n{note.description}\n"
     if note.tags:
         markdown += "\n" + " ".join(f"#{tag}" for tag in note.tags) + "\n"
     atomic_write(directory / "note.md", markdown)
