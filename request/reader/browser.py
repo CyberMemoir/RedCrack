@@ -522,7 +522,7 @@ class XHSReader:
                     note.access = {
                         "url": note.url,
                         "source_url": self.page.url,
-                        "method": "navigate",
+                        "method": "navigate" if "xsec_token=" in note.url else "source_card",
                     }
                     note.content_scope = "search_card"
                     self.cache.put("access", note.note_id, [note])

@@ -25,6 +25,11 @@ class ReaderLimitTests(unittest.IsolatedAsyncioTestCase):
                         reader._check_access = AsyncMock()
                         reader._clear_responses = lambda: None
                         reader.page = AsyncMock()
+                        reader.page.url = (
+                            "https://www.xiaohongshu.com/explore"
+                            if kind == "discover"
+                            else "https://www.xiaohongshu.com/search_result?keyword=fixture"
+                        )
                         reader.page.evaluate.return_value = []
                         payload = {
                             "data": {
@@ -48,4 +53,7 @@ class ReaderLimitTests(unittest.IsolatedAsyncioTestCase):
                             notes = await reader.search("fixture", limit=limit, max_scrolls=0)
                         self.assertEqual(len(notes), min(limit, 3))
                         self.assertEqual(reader.list_end_reason, expected)
+                        saved_access = reader.cache.get("access", notes[0].note_id)[0].access
+                        self.assertEqual(saved_access["source_url"], reader.page.url)
+                        self.assertEqual(saved_access["method"], "source_card")
                         reader.page = None
