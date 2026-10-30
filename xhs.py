@@ -190,6 +190,19 @@ def build_parser() -> argparse.ArgumentParser:
     candidate.add_argument("--bili-database", required=True)
     candidate.add_argument("--directory", required=True)
     candidate.add_argument("--limit", type=positive_int, default=5)
+    frontier = sub.add_parser("frontier", help="小红书候选持续发现frontier；本轮只允许离线回放")
+    frontier_ops = frontier.add_subparsers(dest="operation", required=True)
+    run_frontier = frontier_ops.add_parser("run")
+    run_frontier.add_argument("--config", required=True)
+    run_frontier.add_argument("--rounds", type=positive_int)
+    for name in ("status", "stop", "resume", "resolve"):
+        operation = frontier_ops.add_parser(name)
+        operation.add_argument("--state-dir", required=True)
+        if name in {"stop", "resume", "resolve"}:
+            operation.add_argument("--reason", required=True)
+        if name == "resolve":
+            operation.add_argument("--job-id", required=True)
+            operation.add_argument("--decision", choices=["retry", "abandon"], required=True)
     return parser
 
 
@@ -362,6 +375,12 @@ async def _download_batch(
 
 
 async def _run(args: argparse.Namespace) -> int:
+    if args.command == "frontier":
+        from request.reader.frontier_cli import frontier_cli
+
+        result = await frontier_cli(args)
+        print(json.dumps(result, ensure_ascii=False))
+        return 2 if (result.get("last_receipt") or {}).get("fault") else 0
     if args.command == "candidate-anchors":
         from request.reader.candidate_anchor import candidate_cli
 
