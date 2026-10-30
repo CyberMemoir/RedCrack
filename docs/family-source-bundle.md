@@ -2,6 +2,8 @@
 
 本模块输出`family-source-bundle-v1`，供中央collector 0.5.0导入。它与既有`platform-collection-v1`图导出并存；不修改中央Store、任务队列、正式梗或人工query/gold。采集及规则处理运行时0 AI，不下载媒体。
 
+多轮增量发现和候选执行使用独立的[离线frontier CLI](frontier.md)，不要求伪造正式family_id，也不解除AccessPause。原family-action接口继续保留。
+
 ## 从已保存观察生成自包含包
 
 ```powershell

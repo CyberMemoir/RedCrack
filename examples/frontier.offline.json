@@ -1,0 +1,11 @@
+{
+  "driver": "offline_replay",
+  "state_dir": "../output/frontier-demo/frontier",
+  "source_database": "../output/frontier-demo/bili/collection.sqlite3",
+  "replay_file": "../output/frontier-demo/replay.json",
+  "batch": 2,
+  "source_batch": 1,
+  "update_batch": 1,
+  "max_depth": 1,
+  "idle_seconds": 1
+}
