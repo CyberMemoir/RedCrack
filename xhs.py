@@ -184,6 +184,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
     anchor.add_argument("--input", required=True)
     anchor.add_argument("--directory", required=True)
+    candidate = sub.add_parser(
+        "candidate-anchors", help="只读B站已存候选元数据，生成非正式family的隔离锚点包"
+    )
+    candidate.add_argument("--bili-database", required=True)
+    candidate.add_argument("--directory", required=True)
+    candidate.add_argument("--limit", type=positive_int, default=5)
     return parser
 
 
@@ -356,6 +362,11 @@ async def _download_batch(
 
 
 async def _run(args: argparse.Namespace) -> int:
+    if args.command == "candidate-anchors":
+        from request.reader.candidate_anchor import candidate_cli
+
+        print(json.dumps(candidate_cli(args), ensure_ascii=False))
+        return 0
     if args.command == "family-anchor":
         from request.reader.family_anchor import anchor_cli
 
