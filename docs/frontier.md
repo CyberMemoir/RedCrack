@@ -31,9 +31,29 @@ new_watermark沿选定表的rowid推进；update_watermark对已读行做有界�
 
 本地frontier.sqlite3分别存anchors、jobs、paths、cards、works、access、roles和receipts。公开来源URL规范为/explore/note_id，原访问token/source-card数据位于私有access映射；原观察JSON对象也仅在私有state目录。一个作品可有多个BVID/已知family和多条搜索/引用路径；URL去重不删paths。已经取得详情的作品收到新锚点路径时，会重新关联已有证据而不重复读取，并沿有界显式引用补路径。
 
-队列优先明确链接，在head/history两lane间持久轮转，分页延续进入history。搜索卡片另存，不升格详情；详情必须同ID且scope=detail，ReaderError不可用项不写works。原生related接口未实现，只扩展实际正文中的明确小红书引用（每观察最多2链接，默认1层，最大2层）。源链接每字段最多3个、源查询每观察最多3个；这些是显式有界处理范围，不声称全量链接覆盖。
+队列优先明确链接，在head/history两lane间持久轮转，分页延续进入history。搜索卡片另存，不升格详情；详情必须同ID且scope=detail，ReaderError不可用项不写works。related独立任务已接入队列，但真实入口合同缺失，仅显式related fixture启用；正常reader不会把首页推荐、评论或正文引用当related。related响应须绑定parent_note，保留多父笔记/多锚点路径，子详情按稳定ID共用；后到的锚点路径可贯穿已缓存的多页结果，不重新读取。related本身只证明发现路径，角色初始unknown。扩展共用默认1层、最大2层界限，每页最多20卡片。正文明确小红书引用仍每观察最多2链接；源链接每字段最多3个、源查询每观察最多3个。
 
-每个回放页原样保存cursor/next_cursor；耗尽、无匹配、重复cursor/环与unsupported均有状态。真实正常search跨进程cursor/session合同仍unsupported；NormalReaderDriver仅有界head，不能把fixture token或B站页码拼进请求。真实搜索/详情未在本轮访问，不把离线结果升级live_verified。
+每页持久保存cursor/next_cursor和私有page_results；耗尽、重复cursor/环、重复页、无新增ID、空页仍声称has_more、矛盾耗尽元数据分别保存原因并停止该分支。终页无结果记录no_match及entry_exhausted；不自动重试停滞分支。
+
+原生搜索接线见下节。NormalReaderDriver仍只做原有有界head；NativeSearchDriver是独立受控适配器，CLI仍拒绝live配置。真实搜索/详情未在本轮访问，不把离线结果升级live_verified。
+
+## 原生搜索合同与缺失证据
+
+已有公开项目源码`request/web/apis/note.py::Note.search_notes`给出POST `/api/sns/web/v1/search/notes`及keyword/page/page_size/search_id/sort/note_type/ext_flags/geo/image_formats。它是页码合同，不是评论cursor。`native_search.search_request/search_page`据此实现参数传播：从实际捕获的请求body起步，原样保留过滤参数及未知扩展字段、同一search_id，只将page加1。保存的next_cursor是`{contract: xhs-search-page-v1, request_body: ...}`，不拼接fixture游标或B站页码。缺search_id、关键词不符、非正整数page、page_size超20均拒绝。
+
+返回结构data.items及has_more/hasMore来自已有正常reader解析代码；has_more必须显式boolean，缺失时停止，不能猜耗尽。真实接口是否仍遵守这些字段尚无本轮响应证明。NativeSearchDriver只接收调用方注入的transport及捕获请求seeds，先查AccessPause、默认permit_live=false，再沿用ProfileRuntime锁/interval/预算。它不创建登录会话、不新增签名逻辑；request/response SHA关联存私有evidence。未来transport需用获准的现有会话，不应通过改写已签名请求来接线。HTTP限制/行为提醒持久暂停；登录失效停止。此PR没有把它接成可运行的正常Chrome原生请求发送器，CLI仅运行offline_replay。
+
+已有本地档案审计109个JSON：0个正常search-response、0个search-context；32处cursor属于详情评论，不能证明搜索翻页。尚需恢复后采到：相同关键词/过滤条件的连续两页正常请求body（page、page_size、search_id及扩展字段）、对应响应data.items/has_more、下一页同会话行为及终页。源码没有证明search_id的服务器寿命/跨进程有效期，失败需停止，不自动换ID或重新登录。
+
+related仍缺：可确认的正常页面入口/请求path、method、父note_id绑定字段、会话/访问字段、分页字段、响应卡片容器及has_more语义；也缺两父笔记实际指向同一子笔记的响应证据。没有猜endpoint或把homefeed推荐当相关推荐。队列/解析后的卡片交接/分页/多父去重可离线验证，真实请求与原始响应解析待上述合同；作者/话题分页不在本轮接线范围。
+
+新的可复现合成验收（所有ID/session/related页均为fixture）：
+
+```powershell
+python -m tests.fixtures.create_native_frontier_demo --directory output/native-demo
+python xhs.py frontier run --config output/native-demo/config.json --rounds 8
+python xhs.py frontier status --state-dir output/native-demo/frontier
+```
 
 角色证据均是candidate_not_confirmed、origin_confirmed=false。明确B站链接/引用可形成source引用候选，不等于起源；derivative必须有改词/剪辑/翻唱等动作和锚点目标文字，usage需目标及用法/模板等线索，保留各自原文位置。两角色可重叠；只有同词而无动作/用法证据时保留unknown。合集、歧义和文本不足没有被强判父子关系。作品发布时间及本次指标快照保持原值，不要求历史热度证明。
 
@@ -57,9 +77,10 @@ status使用只读SQLite，不建队列、不发请求。记录的worker PID为�
 | --- | --- | --- | --- |
 | 持久frontier/多路径/稳定note去重 | 是 | 是 | 未启动live |
 | B站新增水位/旧行有界复核/新head epoch | 是 | 是 | 本地只读源，无平台请求 |
-| head/history公平轮转、分页推进/停滞 | 是 | replay | 真实搜索cursor unsupported |
+| 原生search page/search_id参数、持久推进/停滞 | 是，源码合同+注入transport | 合成响应；非真实响应 | live_blocked；捕获seed及正常Chrome transport未接通 |
 | 同ID完整详情、source/二创/用法候选 | 是 | replay及原reader离线检查 | 旧账号暂停live_blocked |
 | STOP/重启/unknown inflight/单进程锁 | 是 | 是 | 未启动live |
-| 原生related/作者/话题分页 | 否 | 否 | unsupported，缺正常入口合同 |
+| related独立任务/分页/多父路径及详情去重 | 是，解析后卡片交接 | fixture；不是原生合同证据 | 真实入口及原始响应解析contract_missing |
+| 作者/话题分页 | 否 | 否 | unsupported |
 
 平台账号暂停由既有设备登录上限历史报告产生，不等于本轮新验证码或AccessBlocked。此实现可继续离线验证；恢复访问需后续明确处理并授权。服务器常驻部署、中央资源租约及dispatcher都不在本PR范围。

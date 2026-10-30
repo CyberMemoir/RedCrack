@@ -6,9 +6,12 @@ from pathlib import Path
 from .access import AccessPause
 from .browser import XHSReader
 from .errors import LoginRequiredError, ReaderError, VerificationRequiredError
+from .evidence import EvidenceArchive
 from .export import write_json
 from .family_bundle import encoded, sha256
 from .models import Note
+from .native_search import SEARCH_PATH, search_page, search_request
+from .runtime import ProfileRuntime
 
 
 class ReplayDriver:
@@ -26,6 +29,7 @@ class ReplayDriver:
         ):
             raise ValueError("Only explicitly labelled replay fixtures are accepted")
         self.calls = []
+        self.related_enabled = bool(self.data.get("related"))
 
     async def read(self, job, accesses):
         self.calls.append((job["kind"], job["target"], json.loads(job["cursor"])))
@@ -38,8 +42,17 @@ class ReplayDriver:
                 if "note_id" in row
                 else row | {"platform_requests": 0}
             )
-        for page in self.data["searches"]:
-            if page["query"] == job["target"] and encoded(page["cursor"]).decode() == job["cursor"]:
+        pages = self.data.get("related", []) if job["kind"] == "related" else self.data["searches"]
+        for page in pages:
+            target = page.get("parent_note") if job["kind"] == "related" else page["query"]
+            if target == job["target"] and encoded(page["cursor"]).decode() == job["cursor"]:
+                if "native_request" in page:
+                    cursor = json.loads(job["cursor"])
+                    if cursor is not None and cursor.get("request_body") != page["native_request"]:
+                        raise ValueError("Replay request must match persisted native continuation")
+                    return search_page(target, page["native_request"], page["native_response"]) | {
+                        "platform_requests": 0
+                    }
                 return page | {"platform_requests": 0}
         return {"outcome": "replay_missing", "platform_requests": 0}
 
@@ -60,6 +73,8 @@ class NormalReaderDriver:
             return {"outcome": "blocked_verification", "platform_requests": 0}
         if not self.permit_live:
             return {"outcome": "live_disabled", "platform_requests": 0}
+        if job["kind"] == "related":
+            return {"outcome": "related_contract_missing", "platform_requests": 0}
         if job["kind"] == "search" and json.loads(job["cursor"]) is not None:
             return {"outcome": "unsupported_native_cursor", "platform_requests": 0}
         try:
@@ -126,3 +141,82 @@ class NormalReaderDriver:
             return {"outcome": "blocked_login", "platform_requests": None}
         except ReaderError:
             return {"outcome": "unavailable", "platform_requests": None}
+
+
+class NativeSearchDriver:
+    """Explicit transport injection; never creates a session or enables the CLI.
+
+    transport(path, body) returns (HTTP status, decoded JSON). Seeds must come
+    from captured page requests. The adapter neither creates nor alters signing.
+    """
+
+    mode = "native_search_live_blocked"
+
+    def __init__(
+        self, profile, evidence_dir, *, transport, seeds, permit_live=False, detail_driver=None
+    ):
+        self.pause = AccessPause(Path(profile))
+        self.evidence = EvidenceArchive(Path(evidence_dir))
+        self.transport, self.seeds = transport, seeds
+        self.permit_live, self.detail_driver = permit_live, detail_driver
+
+    async def read(self, job, accesses):
+        try:
+            self.pause.check()
+        except VerificationRequiredError:
+            return {"outcome": "blocked_verification", "platform_requests": 0}
+        if not self.permit_live:
+            return {"outcome": "live_disabled", "platform_requests": 0}
+        if job["kind"] != "search":
+            if job["kind"] == "detail" and self.detail_driver:
+                return await self.detail_driver.read(job, accesses)
+            return {
+                "outcome": "related_contract_missing"
+                if job["kind"] == "related"
+                else "detail_driver_missing",
+                "platform_requests": 0,
+            }
+        cursor = json.loads(job["cursor"])
+        if cursor is None:
+            body = self.seeds.get(job["target"])
+            if body is None:
+                return {"outcome": "captured_search_request_missing", "platform_requests": 0}
+        else:
+            if not isinstance(cursor, dict) or cursor.get("contract") != "xhs-search-page-v1":
+                raise ValueError("Cursor is not a native search request")
+            body = cursor["request_body"]
+        body = search_request(job["target"], body)
+        request_ref = self.evidence.save(
+            "native-search-request", {"path": SEARCH_PATH, "body": body}
+        )
+        runtime = ProfileRuntime(self.pause.path.parent)
+        try:
+            try:
+                await runtime.before("search", self.pause.check)
+            except VerificationRequiredError:
+                return {"outcome": "blocked_verification", "platform_requests": 0}
+            status, payload = await self.transport(SEARCH_PATH, body)
+        finally:
+            runtime.close()
+        response_ref = self.evidence.save(
+            "native-search-response",
+            {"request_sha256": request_ref["sha256"], "status": status, "payload": payload},
+        )
+        from .browser import WARNING_MARKERS
+
+        message = str(payload.get("msg") or payload.get("message") or "")
+        if status in (403, 412, 429, 461, 471, 567) or any(m in message for m in WARNING_MARKERS):
+            try:
+                self.pause.stop(f"Native search access restriction HTTP {status}")
+            except VerificationRequiredError:
+                pass
+            return {"outcome": "blocked_verification", "platform_requests": 1}
+        if status == 401 or payload.get("code") in (-100, -100100, -101):
+            return {"outcome": "blocked_login", "platform_requests": 1}
+        if status >= 400 or payload.get("success") is False:
+            raise ReaderError("Native search response failed; no automatic retry")
+        result = search_page(job["target"], body, payload)
+        for note in result["notes"]:
+            note["observed_at"] = response_ref["observed_at"]
+            note["evidence"] = [response_ref]
+        return result | {"platform_requests": 1}

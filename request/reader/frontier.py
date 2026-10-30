@@ -84,6 +84,8 @@ class Frontier:
                 CREATE TABLE IF NOT EXISTS access(ref TEXT PRIMARY KEY,note_id TEXT NOT NULL,record TEXT NOT NULL);
                 CREATE TABLE IF NOT EXISTS roles(path TEXT PRIMARY KEY,work TEXT NOT NULL,roles TEXT NOT NULL,evidence TEXT NOT NULL);
                 CREATE TABLE IF NOT EXISTS receipts(id INTEGER PRIMARY KEY,record TEXT NOT NULL);
+                CREATE TABLE IF NOT EXISTS page_results(job TEXT PRIMARY KEY,kind TEXT,target TEXT,epoch TEXT,fingerprint TEXT,result TEXT NOT NULL);
+                CREATE INDEX IF NOT EXISTS page_stream ON page_results(kind,target,epoch,fingerprint);
             """)
 
     @contextmanager
@@ -186,6 +188,7 @@ class Frontier:
                 )
                 note = json.loads(work["record"])
                 self.role(db, path, target, note, proof)
+                self.enqueue_related(db, target, anchor, proof, work["sha"], depth)
                 if depth < self.get("max_depth", 1):
                     for match in list(LINK.finditer(note.get("description", "")))[:2]:
                         self.enqueue_link(
@@ -204,7 +207,64 @@ class Frontier:
                             depth=depth + 1,
                             lane="history",
                         )
+        elif kind == "related":
+            saved = db.execute(
+                "SELECT result FROM page_results WHERE job=?", (identity,)
+            ).fetchone()
+            if saved:
+                result = json.loads(saved[0])
+                for card in result["notes"]:
+                    self.job(
+                        db,
+                        "detail",
+                        card["note_id"],
+                        proof
+                        | {
+                            "discovered_by": identity,
+                            "parent_note": target,
+                            "card_sha": self.archive(encoded(card)),
+                            "access_ref": self.access_ref(
+                                db,
+                                card["note_id"],
+                                card.get("access") or {"url": card["url"], "method": "navigate"},
+                            ),
+                        },
+                        anchor,
+                        depth=depth,
+                        lane="history",
+                    )
+                state = db.execute("SELECT state FROM jobs WHERE id=?", (identity,)).fetchone()[0]
+                if result.get("next_cursor") is not None and state == "done":
+                    self.job(
+                        db,
+                        kind,
+                        target,
+                        proof,
+                        anchor,
+                        cursor=result["next_cursor"],
+                        epoch=epoch,
+                        depth=depth,
+                        lane="history",
+                    )
         return identity
+
+    def enqueue_related(self, db, parent, anchor, proof, digest, depth):
+        if self.get("related_enabled", False) and depth < self.get("max_depth", 1):
+            self.job(
+                db,
+                "related",
+                parent,
+                proof
+                | {
+                    "roles": ["unknown"],
+                    "rule": "related_discovery_not_relationship",
+                    "parent_note": parent,
+                    "detail_sha": digest,
+                },
+                anchor,
+                depth=depth + 1,
+                lane="history",
+            )
 
     def access_ref(self, db, note_id, access):
         if access.get("url") and note_id_from_url(normalize_note_url(access["url"])) != note_id:
@@ -430,7 +490,38 @@ class Frontier:
                 if state == "blocked":
                     self.put(db, "platform_stop", outcome)
                 return
-            if job["kind"] == "search":
+            if job["kind"] in {"search", "related"}:
+                related = job["kind"] == "related"
+                if related and result.get("parent_note") != job["target"]:
+                    raise ValueError("Related response must bind the exact parent note")
+                if len(result["notes"]) > 20:
+                    raise ValueError("Listing exceeds the 20-card page budget")
+                fingerprint = sha256(encoded(sorted({n["note_id"] for n in result["notes"]})))
+                repeated = db.execute(
+                    "SELECT 1 FROM page_results WHERE kind=? AND target=? AND epoch=? AND fingerprint=? AND job<>?",
+                    (job["kind"], job["target"], job["epoch"], fingerprint, job["id"]),
+                ).fetchone()
+                seen_ids = {
+                    r[0]
+                    for r in db.execute(
+                        "SELECT json_extract(n.value,'$.note_id') FROM page_results p,json_each(p.result,'$.notes') n WHERE p.kind=? AND p.target=? AND p.epoch=? AND p.job<>?",
+                        (job["kind"], job["target"], job["epoch"], job["id"]),
+                    )
+                }
+                no_new_ids = bool(seen_ids) and all(
+                    n["note_id"] in seen_ids for n in result["notes"]
+                )
+                db.execute(
+                    "INSERT OR REPLACE INTO page_results VALUES(?,?,?,?,?,?)",
+                    (
+                        job["id"],
+                        job["kind"],
+                        job["target"],
+                        job["epoch"],
+                        fingerprint,
+                        encoded(result).decode(),
+                    ),
+                )
                 for row in result["notes"]:
                     if row.get("content_scope") != "search_card":
                         raise ValueError("Search result must remain search_card, not a full detail")
@@ -438,7 +529,7 @@ class Frontier:
                     if note_id_from_url(normalize_note_url(row["url"])) != note_id:
                         raise ValueError("Search-card ID/URL mismatch")
                     digest = self.archive(encoded(row))
-                    stats["search_cards"] += 1
+                    stats["related_cards" if related else "search_cards"] += 1
                     ref = self.access_ref(
                         db, note_id, row.get("access") or {"url": row["url"], "method": "navigate"}
                     )
@@ -459,13 +550,40 @@ class Frontier:
                             "detail",
                             note_id,
                             proof
-                            | {"access_ref": ref, "discovered_by": job["id"], "card_sha": digest},
+                            | {"access_ref": ref, "discovered_by": job["id"], "card_sha": digest}
+                            | (
+                                {"parent_note": job["target"], "roles": ["unknown"]}
+                                if related
+                                else {}
+                            ),
                             path["anchor"],
                             lane=job["lane"],
+                            depth=proof.get("depth", 0),
                         )
                 if not result["notes"]:
                     stats["no_match"] += 1
                 next_cursor = result.get("next_cursor")
+                if result.get("exhausted") and next_cursor is not None:
+                    db.execute(
+                        "UPDATE jobs SET state='stalled',reason='conflicting_page_metadata' WHERE id=?",
+                        (job["id"],),
+                    )
+                    stats["stalled"] += 1
+                    return
+                if next_cursor is not None and (repeated or no_new_ids or not result["notes"]):
+                    db.execute(
+                        "UPDATE jobs SET state='stalled',reason=? WHERE id=?",
+                        (
+                            "repeated_page"
+                            if repeated
+                            else "no_new_note_ids"
+                            if result["notes"]
+                            else "no_progress_empty_page",
+                            job["id"],
+                        ),
+                    )
+                    stats["stalled"] += 1
+                    return
                 if next_cursor is not None:
                     if encoded(next_cursor).decode() == job["cursor"]:
                         db.execute(
@@ -474,7 +592,9 @@ class Frontier:
                         )
                         stats["stalled"] += 1
                         return
-                    next_id = sha256(encoded(["search", job["target"], next_cursor, job["epoch"]]))
+                    next_id = sha256(
+                        encoded([job["kind"], job["target"], next_cursor, job["epoch"]])
+                    )
                     previous = db.execute(
                         "SELECT state FROM jobs WHERE id=?", (next_id,)
                     ).fetchone()
@@ -488,13 +608,14 @@ class Frontier:
                     for path in paths:
                         self.job(
                             db,
-                            "search",
+                            job["kind"],
                             job["target"],
                             json.loads(path["proof"]),
                             path["anchor"],
                             cursor=next_cursor,
                             epoch=job["epoch"],
                             lane="history",
+                            depth=json.loads(path["proof"]).get("depth", 0),
                         )
                 stats["exhausted"] += bool(result.get("exhausted"))
                 if result.get("continuation_unsupported"):
@@ -530,6 +651,9 @@ class Frontier:
                     proof = json.loads(path["proof"])
                     self.role(db, path["id"], job["target"], row, proof)
                     path_depth = proof.get("depth", depth)
+                    self.enqueue_related(
+                        db, job["target"], path["anchor"], proof, digest, path_depth
+                    )
                     if path_depth < max_depth:
                         for match in list(LINK.finditer(row.get("description", "")))[:2]:
                             self.enqueue_link(
@@ -554,6 +678,8 @@ class Frontier:
                     encoded(result.get("next_cursor")).decode(),
                     "continuation_unsupported"
                     if result.get("continuation_unsupported")
+                    else "entry_exhausted"
+                    if result.get("exhausted")
                     else "complete_bounded_step",
                     job["id"],
                 ),
@@ -575,17 +701,21 @@ class Frontier:
             "platform_requests": 0,
             "driver_calls": 0,
             "search_cards": 0,
+            "related_cards": 0,
             "unique_details": 0,
             "duplicates": 0,
             "no_match": 0,
             "exhausted": 0,
             "stalled": 0,
             "jobs": [],
-            "related_native": "unsupported",
+            "related_native": "fixture_only"
+            if getattr(driver, "related_enabled", False)
+            else "contract_missing",
             "at": time.time(),
         }
         with self.db() as db:
             self.put(db, "max_depth", max_depth)
+            self.put(db, "related_enabled", bool(getattr(driver, "related_enabled", False)))
         if self.poll_stop() or self.get("platform_stop"):
             stats["status"] = "stopped"
         else:
