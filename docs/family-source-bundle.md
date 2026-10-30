@@ -101,3 +101,16 @@ source_hint支持url/named/phrase；有明确小红书链接就产生优先的de
 别称/原句原样生成find_independent_uses动作，role_candidates可以同时含derivative和usage，relation_status始终candidate_not_confirmed；弱关联不丢弃，也不强判父边。new_name_leads只保存在plan的bilibili_review_leads，不生成family。CLI仅写计划和动作，不访问网络或自动提交中央队列。
 
 source记录保留原始likes/views/collects/comments/shares值（有才存）、metrics_observed_at及证据JSON中的原指标；不设新阈值，不补造历史播放。发布时间仍按已有明确单位/精度合同，不能用讲解发布时间替代素材发布时间。作者/话题/评论/归档能力只用于补锚点材料。中央调度、服务器资源及常驻部署不在本路线实现。
+
+## 无正式family的采集候选
+
+```powershell
+python xhs.py candidate-anchors --bili-database SAVED_BILI_DATA/collection.sqlite3 --directory output/candidate-snapshot --limit 5
+python -m unittest tests.test_reader_candidate_anchor
+```
+
+此命令使用SQLite mode=ro/query_only，只读observations中已保存的strong_candidate，最多检查200行、导出1–10个不同BVID；不运行B站runner或重新分类，不访问平台。复制已有原JSON证据前核对SHA，title/description的pointer须与原文完全一致。输出candidates.jsonl、objects和xhs-candidate-anchor-bundle-v1 manifest；目录必须位于原collector data之外，已有输出不覆盖。
+
+每个candidate_id为bilibili:BVID，family_id保持null，family_creation_authorized=false，与正式family动作和中央入库隔离。query_candidates只保留已有规则subject，缺失就为空，不把讲解标题强作梗名；明确文本链接仅是作者引用线索，不确认为源头。现有family-action仍要求正式UUID，不能把candidate_id伪装为family_id。后续候选检索接口尚需独立接线，不能将此元数据包描述为已开始小红书实采。
+
+持久访问暂停优先于泛化试跑授权。设备登录上限的历史用户报告既不是新验证码，也不是新HTTP AccessBlocked。暂停存在时不启动reader、后台collector或恢复试探；半小时检查由主会话统一执行，本工具不另建自动化。只读检查可以报告暂停是否仍在、是否到达共同验收截止时间，不自动恢复用户停止或访问暂停。

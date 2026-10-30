@@ -54,6 +54,8 @@ def validate_action(action):
         or action.get("target_platform") != "xiaohongshu"
     ):
         raise ValueError("This adapter accepts Xiaohongshu search or explicit detail actions")
+    if not isinstance(action.get("family_id"), str):
+        raise ValueError("A registered family UUID is required; candidate bundles remain separate")
     uuid.UUID(action["family_id"])
     if (
         action.get("purpose") not in PURPOSES
